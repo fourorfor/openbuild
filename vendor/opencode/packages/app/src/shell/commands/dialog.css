@@ -1,0 +1,137 @@
+.command-palette {
+  overflow: hidden;
+}
+
+/* Keep a fixed height so the dialog does not resize as results change while typing. */
+[data-component="dialog-v2"]:has(.command-palette) [data-slot="dialog-container"] {
+  width: min(calc(100vw - 24px), 640px);
+  height: min(calc(100vh - 96px), 480px);
+  border-radius: 12px;
+  background: var(--v2-background-bg-base);
+  box-shadow: var(--v2-elevation-floating);
+}
+
+.command-palette-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+}
+
+.command-palette-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.command-palette-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 6px 6px 8px;
+}
+
+.command-palette-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.command-palette-group-title {
+  margin: 6px 0;
+  padding: 0 12px;
+  color: var(--v2-text-text-muted);
+  font-size: 13px;
+  font-weight: 440;
+  line-height: 16px;
+  letter-spacing: -0.04px;
+  user-select: none;
+}
+
+.command-palette-row-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+}
+
+.command-palette-row-icon {
+  flex-shrink: 0;
+  color: var(--v2-icon-icon-muted);
+}
+
+.command-palette-row-text {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.command-palette-description,
+.command-palette-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--v2-text-text-muted);
+  font-size: 13px;
+  font-weight: 440;
+  line-height: 16px;
+  letter-spacing: -0.04px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-meta {
+  flex-shrink: 0;
+}
+
+.command-palette-file-path {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 16px;
+  letter-spacing: -0.04px;
+}
+
+.command-palette-file-dir {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--v2-text-text-muted);
+  font-weight: 440;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-file-name {
+  flex-shrink: 0;
+  color: var(--v2-text-text-base);
+  font-weight: 530;
+  white-space: nowrap;
+}
+
+.command-palette-state {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  color: var(--v2-text-text-muted);
+  font-size: 13px;
+  font-weight: 440;
+  line-height: 16px;
+  letter-spacing: -0.04px;
+}
+
+@media (max-width: 640px) {
+  .command-palette-row-text {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+  }
+
+  .command-palette-title,
+  .command-palette-description {
+    max-width: 100%;
+  }
+}
