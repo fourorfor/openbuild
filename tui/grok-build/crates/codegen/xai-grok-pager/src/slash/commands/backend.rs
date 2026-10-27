@@ -46,6 +46,22 @@ pub fn report() -> String {
         lines.push(format!("Kernel: {}", path.display()));
     }
     lines.push(format!("Capabilities: {}", describe_capabilities(profile)));
+    if let Some(status) = openbuild_backend::http_feed::active_status() {
+        let mut line = format!(
+            "HTTP feed: {} ({} events, {} dropped, {} reconnects)",
+            status.state.label(),
+            status.received,
+            status.dropped,
+            status.reconnects
+        );
+        if let Some(kind) = status.last_event.as_deref() {
+            line.push_str(&format!(", last: {kind}"));
+        }
+        lines.push(line);
+        if let Some(error) = status.last_error.as_deref() {
+            lines.push(format!("HTTP feed error: {error}"));
+        }
+    }
     lines.join("\n")
 }
 

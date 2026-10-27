@@ -9,10 +9,12 @@
 //! - [`health`]: kernel liveness, crash reason and reconnect requests
 //! - [`adapter`]: wire-shape normalization for grok's renderer
 //! - [`config`]: session `configOptions` ⇄ model / effort / mode selections
+//! - [`http_feed`]: optional read-only HTTP/SSE side channel into the kernel
 
 pub mod adapter;
 pub mod config;
 pub mod health;
+pub mod http_feed;
 pub mod profile;
 pub mod spawn;
 pub mod transport;

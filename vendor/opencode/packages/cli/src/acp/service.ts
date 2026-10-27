@@ -72,6 +72,12 @@ export function make(input: {
   readonly sessions: ACPSessions.Interface
   readonly capabilities: Ref.Ref<Capabilities>
   readonly turn: ACPTurn.Interface
+  /**
+   * The standalone server this ACP process is talking to. Advertised only to
+   * clients that opt in with `clientCapabilities._meta["openbuild/http-feed"]`,
+   * so an external ACP client cannot read the lease credential by accident.
+   */
+  readonly server?: { readonly url: string; readonly password: string }
 }): Interface {
   const currentOptions = Effect.fnUntraced(function* (attached: Attached) {
     return configOptions(yield* input.catalog.get(attached.cwd), yield* Ref.get(attached.selection))
@@ -152,6 +158,13 @@ export function make(input: {
           "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "OpenCode Login" },
         }
       }
+      // The TUI opts in because it needs tool progress and diffs that ACP does
+      // not carry. Other clients keep the default surface and never see the
+      // per-process lease credential.
+      const httpFeed =
+        input.server && params.clientCapabilities?._meta?.["openbuild/http-feed"] === true
+          ? { url: input.server.url, password: input.server.password }
+          : undefined
       return {
         protocolVersion: 1,
         agentCapabilities: {
@@ -166,6 +179,7 @@ export function make(input: {
         _meta: {
           ...(modelState ? { modelState } : {}),
           ...(availableCommands ? { availableCommands } : {}),
+          ...(httpFeed ? { "openbuild/httpFeed": httpFeed } : {}),
         },
       }
     }),

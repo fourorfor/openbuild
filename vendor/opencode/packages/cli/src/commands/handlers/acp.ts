@@ -32,7 +32,10 @@ export default Runtime.handler(
       ),
       Effect.provide(FetchHttpClient.layer),
     )
-    const connection = yield* ACP.connect(client, ndJsonStream(Writable.toWeb(process.stdout), Bun.stdin.stream()))
+    const connection = yield* ACP.connect(client, ndJsonStream(Writable.toWeb(process.stdout), Bun.stdin.stream()), {
+      url: endpoint.url,
+      password: endpoint.auth.password,
+    })
     const failure = yield* Effect.raceFirst(
       Effect.promise(() => connection.closed).pipe(
         Effect.map(() =>

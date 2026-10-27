@@ -11,6 +11,7 @@ members = [
     "crates/codegen/ptyctl-cli",
     "crates/codegen/xai-acp-lib",
     "crates/codegen/openbuild-backend",
+    "crates/codegen/openbuild-server",
     "crates/codegen/xai-agent-lifecycle",
     "crates/codegen/xai-chat-state",
     "crates/codegen/xai-codebase-graph",

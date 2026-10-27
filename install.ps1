@@ -1,10 +1,10 @@
-# Build both binaries and install them for the current user.
+# Build all binaries and install them for the current user.
 #
-#   .\install.ps1              # build (debug) + install
+#   .\install.ps1              # build (release) + install
 #   .\install.ps1 -SkipBuild   # install whatever is already in dist\
 #
 # Installs to %LOCALAPPDATA%\OpenBuild and adds that directory to the user
-# PATH, so `openbuild` works from any terminal afterwards.
+# PATH, so `openbuild` and `openbuild-server` work from any terminal afterwards.
 
 param(
     [switch]$SkipBuild
@@ -23,7 +23,8 @@ if (-not $SkipBuild) {
 
 $tui = Join-Path $dist "openbuild.exe"
 $kernel = Join-Path $dist "openbuild-kernel.exe"
-foreach ($path in @($tui, $kernel)) {
+$server = Join-Path $dist "openbuild-server.exe"
+foreach ($path in @($tui, $kernel, $server)) {
     if (-not (Test-Path $path)) {
         throw "missing $path; run .\build.ps1 (or drop -SkipBuild) first"
     }
@@ -32,6 +33,7 @@ foreach ($path in @($tui, $kernel)) {
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 Copy-Item $tui $installDir -Force
 Copy-Item $kernel $installDir -Force
+Copy-Item $server $installDir -Force
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $segments = @($userPath -split ';' | Where-Object { $_ -ne '' })
@@ -53,5 +55,7 @@ Get-ChildItem $installDir | Select-Object Name, @{ n = 'MB'; e = { [math]::Round
 # Smoke-test the installed copy. The kernel sits next to it, so the TUI finds it
 # without OPENBUILD_KERNEL.
 $version = & (Join-Path $installDir "openbuild.exe") --version
+$serverVersion = & (Join-Path $installDir "openbuild-server.exe") --version
 Write-Host ""
 Write-Host "installed version: $version"
+Write-Host "installed ACP server: $serverVersion"

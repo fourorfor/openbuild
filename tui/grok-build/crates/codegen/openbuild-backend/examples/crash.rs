@@ -41,16 +41,16 @@ async fn main() -> Result<()> {
 
     let mut spec = SpawnSpec::new(kernel);
     spec.cwd = cwd.clone();
-    spec.env.push((
-        "OPENBUILD_BACKEND".to_string(),
-        "opencode".to_string(),
-    ));
+    spec.env
+        .push(("OPENBUILD_BACKEND".to_string(), "opencode".to_string()));
     let cancel = CancellationToken::new();
     let bridge = bridge_subprocess(spec, cancel.clone())?;
     openbuild_backend::health::set_active(bridge.health.clone());
 
     let mut capabilities = acp::ClientCapabilities::new()
-        .fs(acp::FileSystemCapabilities::new().read_text_file(true).write_text_file(false))
+        .fs(acp::FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(false))
         .terminal(false);
     capabilities = capabilities.elicitation(
         acp::ElicitationCapabilities::new().form(acp::ElicitationFormCapabilities::default()),

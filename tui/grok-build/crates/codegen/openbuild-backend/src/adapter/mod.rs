@@ -3,7 +3,13 @@
 //! This layer runs at the single ACP ingest point (`acp_rx.recv()`), before
 //! `acp_handler::handle`. It only changes shapes grok already understands; it
 //! does not implement business logic.
+//!
+//! Child (subagent) traffic needs cross-message state — a spawn is announced
+//! once, then the child's own updates follow — so the entry point is the
+//! [`Normalizer`] state machine; [`normalize_message`] is the stateless subset
+//! for callers that only need the per-message rewrites.
 
+pub mod child;
 pub mod compaction;
 pub mod todo;
 pub mod tool_name;
@@ -18,7 +24,41 @@ enum UpdateAction {
     Drop,
 }
 
-/// Normalize one client-bound ACP message into zero or more messages.
+/// Stateful ingest normalizer.
+///
+/// One instance lives in the TUI event loop for the life of a connection. It
+/// owns the child-session registry, so `task` subagents get a spawn block, a
+/// routed transcript, and a terminal marker even though the kernel speaks a
+/// different method for them.
+#[derive(Debug, Default)]
+pub struct Normalizer {
+    children: child::ChildRegistry,
+}
+
+impl Normalizer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget per-connection state. A restarted kernel re-announces its
+    /// children, so latches must not survive the swap.
+    pub fn reset(&mut self) {
+        self.children.clear();
+    }
+
+    /// Normalize one client-bound ACP message into zero or more messages.
+    pub fn normalize(&mut self, message: AcpClientMessage) -> Vec<AcpClientMessage> {
+        if child::ChildRegistry::handles(&message) {
+            let AcpClientMessage::ExtNotification(args) = message else {
+                unreachable!("handles() only matches ExtNotification");
+            };
+            return self.children.expand(args);
+        }
+        normalize_message(message)
+    }
+}
+
+/// Stateless normalization for one message.
 ///
 /// Most updates pass through unchanged. A `todowrite` call becomes a `plan`
 /// update (and its later `tool_call_update` is suppressed), so grok's todo pane
@@ -104,7 +144,10 @@ fn rewrite_update(update: &mut Value) -> UpdateAction {
             if let Some(variant) = tool_name::variant_for(&name) {
                 inject_variant(update, variant);
             }
-            if matches!(tool_name::canonical_name(&name).as_str(), "websearch" | "web_search") {
+            if matches!(
+                tool_name::canonical_name(&name).as_str(),
+                "websearch" | "web_search"
+            ) {
                 fix_websearch(update);
             }
             UpdateAction::Keep
@@ -161,7 +204,10 @@ fn fix_websearch(update: &mut Value) {
 /// block would lose exit code, signal and truncation state.
 fn shell_output(update: &Value) -> Option<Value> {
     let input = update.get("rawInput")?;
-    let command = input.get("command").or_else(|| input.get("cmd"))?.as_str()?;
+    let command = input
+        .get("command")
+        .or_else(|| input.get("cmd"))?
+        .as_str()?;
     let metadata = update.get("rawOutput")?.get("metadata")?;
     let text = content_text(update);
     let exit_code = metadata

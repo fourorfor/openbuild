@@ -12,7 +12,7 @@ openbuild-kernel.exe (Bun)
 OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 
-本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。
+本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连。
 
 ## 当前状态
 
@@ -21,8 +21,9 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 - `openbuild-kernel.exe acp` 能响应 `initialize`，返回 `agentCapabilities`、9 个可用模型、3 个命令。
 - `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）。
 - Rust 侧子进程桥 `openbuild-backend` 能完成 `initialize → session/new` 往返。
-- `cargo test -p openbuild-backend`：35 个单测全部通过。
+- `cargo test -p openbuild-backend`：59 个单测全部通过（含子智能体与 HTTP feed 用例）。
 - `cargo check -p xai-grok-pager`：通过。
+- `cargo build -p openbuild-server --release`：通过；`openbuild-server --version` → `openbuild-server 0.1.0`。
 - `bun run typecheck`（packages/cli）：通过（1,886 文件）。
 
 已实现的映射/补丁：
@@ -38,6 +39,9 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 | M3 | `config` 模块把内核 `configOptions` 翻译成模型/effort/模式；`/model`、`/effort`、Shift+Tab 在子进程后端走 `session/set_config_option`；`config_option_update` 回写 `ModelState` |
 | M4 | `adapter/compaction` 把内核压缩标记翻译成 TUI 的 `x.ai/session_notification`，压缩过程与失败原因可见 |
 | M5 | 内核崩溃可见且可恢复：`health` 模块归集退出原因与 stderr，事件循环推系统块（退出码 + stderr 尾部），`/reconnect` 重启内核并对每个会话 `session/load` 重放；`/backend` 显示后端类型、内核路径与已声明能力 |
+| M6-D | `adapter/child.rs` 把内核子会话事件展开成 grok 的 `subagent_spawned` / `subagent_finished` 与按子会话 `sessionId` 重投递的更新，复用现有 `subagent_takeover` |
+| M6-F | `openbuild-server` crate：把内核作为 ACP agent 暴露给 Zed/Neovim 的 stdio 中继；`build.ps1` / `install.ps1` 已纳入 |
+| M6-G | HTTP 直连侧通道：ACP 之外只读订阅 `session.tool.progress` / `session.diff` / 完整 usage；`/backend` 显示连接状态、事件数与最近事件 |
 | 品牌 | 全部用户可见名称统一走 `branding` 模块（`OpenBuild`）；crate 名、环境变量与 `~/.grok` 路径保持上游拼写 |
 
 ### 品牌覆盖范围
@@ -63,16 +67,16 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 openbuild/
 ├── README.md
-├── build.ps1              # 构建内核 + TUI，产出 dist/
+├── build.ps1              # 构建内核 + TUI + ACP 服务端，产出 dist/
 ├── run.ps1                # 启动 TUI（自动指向 dist 内核）
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
-├── dist/                  # openbuild.exe / openbuild-kernel.exe
+├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
 ├── patches/               # 两个上游仓库的完整改动（可复现）
 ├── vendor/opencode/       # 内核源码 @ b2526211ec
-└── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend
+└── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
 ```
 
-`patches/` 里是 12 个按主题拆分的补丁（内核 4 个 + TUI 8 个），
+`patches/` 里是 13 个按主题拆分的补丁（内核 4 个 + TUI 9 个），
 应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始
@@ -134,6 +138,7 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 | `OPENBUILD_KERNEL` | 内核可执行文件路径 |
 | `OPENBUILD_PROMPT` | 仅 handshake 示例使用：发送一轮 prompt |
 | `OPENBUILD_THEME_DIR` | 覆盖导入主题的存放目录（默认 `~/.grok/themes`） |
+| `OPENBUILD_HTTP_FEED` | 设为 `0` / `off` 可关闭只读 HTTP 事件侧通道（默认开启） |
 | `PROTOC` | 构建期 protoc 路径（Windows 必需） |
 | `OPENCODE_VERSION` | 构建内核时覆盖版本号（本仓库使用 `2.1.4`，避免 detached 版本触发 free-tier 门槛） |
 
@@ -142,6 +147,32 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 输入 `/backend` 会打印当前后端、内核路径和已声明能力。能力决定菜单项是否存在：
 `config options` 关闭时模型/模式切换会退回 `session/set_model`，`queue extension`
 关闭时 `/queue` 不可用，等等。排查「某个功能不见了」时先看这里。
+
+同一份输出还会显示 HTTP 直连侧通道的状态，例如：
+
+```text
+HTTP feed: connected (128 events, 0 dropped, 0 reconnects, last: session.diff)
+```
+
+它连接的是 ACP 内核正在使用的那个 `serve` 进程，只读订阅 `/api/event`，
+用来补上 ACP 不携带的 `session.tool.progress`、`session.diff` 与完整 usage。
+连接失败只会让这行显示 `stopped` / `reconnecting`，不影响对话主链路。
+
+## 作为 ACP 服务端使用（Zed / Neovim）
+
+`openbuild-server.exe` 把内核包装成一个 ACP agent，走 stdio 与外部客户端通信。
+它自己拉起内核，所以只需要指向内核路径（默认找同目录的 `openbuild-kernel.exe`）：
+
+```powershell
+.\dist\openbuild-server.exe --kernel .\dist\openbuild-kernel.exe --cwd .
+```
+
+在 Zed / Neovim 的 ACP agent 配置里，把启动命令指向这个二进制即可。
+服务端转发 `initialize`、`session/*`、`prompt` / `cancel` 与权限请求；
+通知直接透传，不做 TUI 侧的渲染适配。
+
+> 这是单客户端 stdio 中继：一个 server 进程对应一个外部客户端和一个内核。
+> 真实 Zed/Neovim 接入尚未做端到端验收。
 
 ## 接入第三方模型提供商
 
@@ -284,8 +315,10 @@ NOTIFY {"_meta":{"eventId":"ses_...-1","promptId":"openbuild-handshake-29200","s
 PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 ```
 
-- `cargo test -p openbuild-backend`：38 passed。
+- `cargo test -p openbuild-backend`：59 passed（含 9 个 `adapter::child` 用例与 HTTP feed 用例）。
 - `cargo run -p openbuild-backend --example crash`：`PASS kernel exit detected (code: Some(1))` + `PASS a user stop stays a user stop`。
+- `cargo build -p openbuild-server --release`：Finished；`openbuild-server --version` → `openbuild-server 0.1.0`。
+- `cargo run -p openbuild-server --example relay -- <kernel> <cwd>`：`INITIALIZE agent=OpenCode` → `SESSION ses_...` → `PROMPT stopReason=EndTurn updates=3` → PASS。
 - `cargo test -p xai-grok-pager-render`：1,163 passed / 31 failed（共 1,194，31 个均为 Windows 平台差异，与改动前逐条一致）。
 - `cargo test -p xai-grok-update`：137 passed。
 - `cargo check -p xai-grok-pager`：Finished。
@@ -299,6 +332,11 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 - **权限弹窗**只提供「一次性 / 总是 / 拒绝」三选一。内核的权限模型是 action/resource 规则，
   与 grok 的「命令词高亮」不同构，因此「允许这条命令」的精细行不显示。
 - **压缩摘要**只显示开始/完成/失败，不带 token 前后对比（内核不在标记里给这两个数）。
+- **子智能体 takeover** 的桥接层已有单测；真实 `task` 会话的观感仍需人工验收一次。
+- **HTTP feed 的 UI 消费**尚未做：`/backend` 能看到连接状态与事件计数，但 `session.diff`
+  还没有 diff 视图，完整 usage 也还没有用量面板。
+- **ACP 服务端**是单客户端 stdio 中继；relay 示例已覆盖 initialize / session/new / prompt，
+  但 Zed/Neovim 客户端接入尚未实测。
 - **交互式 TUI 的 PTY 级验收**尚未执行。上游的 `xai-grok-pager-pty-harness`
   在 Windows 上本来就跑不起来（上游自带的 `welcome_screen` 用例同样零输出），
   所以「杀内核 → 提示 → 重连」的传输层由 `openbuild-backend --example crash` 覆盖，

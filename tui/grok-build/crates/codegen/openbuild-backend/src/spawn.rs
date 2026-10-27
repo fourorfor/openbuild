@@ -63,10 +63,8 @@ pub fn default_spec(kernel_path: Option<PathBuf>) -> Option<SpawnSpec> {
     }
     // The kernel must not inherit a caller-provided password; it generates
     // its own per-connection lease credential.
-    spec.env.push((
-        "OPENBUILD_BACKEND".to_string(),
-        "opencode".to_string(),
-    ));
+    spec.env
+        .push(("OPENBUILD_BACKEND".to_string(), "opencode".to_string()));
     if let Some(dir) = resolve_config_dir() {
         spec.env.push((
             "OPENCODE_CONFIG_DIR".to_string(),
@@ -92,7 +90,10 @@ pub fn resolve_config_dir() -> Option<PathBuf> {
 }
 
 /// Testable core of [`resolve_config_dir`].
-fn config_dir_override(explicit: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+fn config_dir_override(
+    explicit: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
     if explicit.is_some() {
         return None;
     }
@@ -113,14 +114,20 @@ mod tests {
     #[test]
     fn missing_explicit_path_is_ignored() {
         let path = PathBuf::from("definitely-not-a-kernel-xyz");
-        assert_ne!(resolve_kernel_path(Some(path)), Some(PathBuf::from("definitely-not-a-kernel-xyz")));
+        assert_ne!(
+            resolve_kernel_path(Some(path)),
+            Some(PathBuf::from("definitely-not-a-kernel-xyz"))
+        );
     }
 
     #[test]
     fn config_dir_override_respects_an_explicit_setting() {
         let home = std::env::temp_dir().join("openbuild-config-dir-explicit");
         std::fs::create_dir_all(home.join(".config").join("openbuild")).expect("create fixture");
-        let resolved = config_dir_override(Some("C:\\elsewhere".into()), Some(home.clone().into_os_string()));
+        let resolved = config_dir_override(
+            Some("C:\\elsewhere".into()),
+            Some(home.clone().into_os_string()),
+        );
         assert_eq!(resolved, None, "OPENCODE_CONFIG_DIR must not be overridden");
     }
 

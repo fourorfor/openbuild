@@ -224,7 +224,10 @@ mod tests {
         let mut response = response(json!({}));
         response.agent_capabilities.load_session = true;
         response.agent_capabilities.prompt_capabilities.image = true;
-        response.agent_capabilities.prompt_capabilities.embedded_context = true;
+        response
+            .agent_capabilities
+            .prompt_capabilities
+            .embedded_context = true;
         let profile = BackendProfile::detect(&response, None);
         assert!(profile.caps.load_session);
         assert!(profile.caps.image_prompt);

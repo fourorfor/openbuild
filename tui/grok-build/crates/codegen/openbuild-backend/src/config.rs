@@ -170,12 +170,15 @@ impl ConfigChange {
 ///
 /// The kernel emits ungrouped lists today; grouping exists in the schema for
 /// future use, and dropping those values would silently empty the picker.
-fn flatten_options(options: &acp::SessionConfigSelectOptions) -> Vec<&acp::SessionConfigSelectOption> {
+fn flatten_options(
+    options: &acp::SessionConfigSelectOptions,
+) -> Vec<&acp::SessionConfigSelectOption> {
     match options {
         acp::SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
-        acp::SessionConfigSelectOptions::Grouped(groups) => {
-            groups.iter().flat_map(|group| group.options.iter()).collect()
-        }
+        acp::SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .collect(),
         _ => Vec::new(),
     }
 }

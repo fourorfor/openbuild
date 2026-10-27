@@ -129,6 +129,9 @@ mod tests {
 
     #[test]
     fn canonical_name_is_used() {
-        assert_eq!(super::super::tool_name::canonical_name("todowrite"), "todowrite");
+        assert_eq!(
+            super::super::tool_name::canonical_name("todowrite"),
+            "todowrite"
+        );
     }
 }

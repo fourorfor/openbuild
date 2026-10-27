@@ -1294,6 +1294,19 @@ fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool 
         && matches!(app.active_view, ActiveView::Welcome)
         && !app.is_zdr_blocked()
 }
+/// Wait for one event from the optional HTTP side channel.
+///
+/// A missing feed parks the future forever so `select!` can keep the branch
+/// unconditional; a closed feed returns `None` and the caller drops the feed.
+async fn next_http_feed_event(
+    feed: &mut Option<openbuild_backend::http_feed::HttpFeed>,
+) -> Option<serde_json::Value> {
+    match feed {
+        Some(feed) => feed.events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Run the main event loop until quit.
 /// Returns a [`RunResult`] with optional exit info (for the resume hint) and a flag for restarting the binary to pick up a downloaded update.
 /// The initial theme MUST come from `term_state.initial_theme`; see [`TerminalState::initial_theme`] for why.
@@ -1909,6 +1922,12 @@ pub(crate) async fn run(
     let mut acp_rx = connection.rx;
     let mut connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
+    // Optional read-only HTTP side channel. It is drained here so its bounded
+    // queue never backs up; `/backend` reads the live counters.
+    let mut http_feed = connection.http_feed;
+    // One normalizer per connection: it latches child-session spawn/finish so a
+    // `task` subagent is announced once and then routed to its own view.
+    let mut normalizer = openbuild_backend::adapter::Normalizer::new();
     // Reconnect generation for kernel restarts; bumped on every successful
     // re-spawn so a stale reload window can be recognized and discarded.
     let mut kernel_generation: u64 = 0;
@@ -2590,7 +2609,7 @@ pub(crate) async fn run(
             }, if input_rx.is_empty() => {
                 let Some(msg) = msg else { break };
                 let mut state_changed = false;
-                for msg in openbuild_backend::adapter::normalize_message(msg) {
+                for msg in normalizer.normalize(msg) {
                     state_changed |= acp_handler::handle(msg, &mut app);
                 }
                 if !app.pending_effects.is_empty() {
@@ -2607,7 +2626,7 @@ pub(crate) async fn run(
                 while drained < ACP_DRAIN_BATCH_MAX && input_rx.is_empty() {
                     let Ok(msg) = acp_rx.try_recv() else { break };
                     drained += 1;
-                    for msg in openbuild_backend::adapter::normalize_message(msg) {
+                    for msg in normalizer.normalize(msg) {
                         state_changed |= acp_handler::handle(msg, &mut app);
                     }
                     if !app.pending_effects.is_empty() {
@@ -2632,6 +2651,23 @@ pub(crate) async fn run(
                     if presenter.request_throttled(now, min_draw_interval) {
                         app.update_notifications();
                     }
+                }
+            }
+
+            // Optional read-only HTTP side channel. Drain one event per pass so
+            // its bounded queue never backs up; the ACP arm above remains the
+            // authoritative path for everything that changes session state.
+            event = next_http_feed_event(&mut http_feed) => {
+                if let Some(event) = event {
+                    let kind = event
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("event");
+                    tracing::trace!(kind, "http feed event");
+                } else {
+                    // Shutdown or a fatal stream error. The TUI keeps running;
+                    // `/backend` reports the stopped feed.
+                    http_feed = None;
                 }
             }
 
@@ -3277,6 +3313,13 @@ pub(crate) async fn run(
                 // Swap the connection channels. The old bridge thread already
                 // exited (its child is gone), so nothing is left to drain.
                 acp_rx = conn.rx;
+                // The old feed points at the dead kernel's server. Drop it and
+                // adopt the new connection's feed, if the new kernel advertised
+                // one.
+                http_feed = conn.http_feed;
+                // The new kernel re-announces its children; stale spawn/finish
+                // latches from the previous process would swallow them.
+                normalizer.reset();
                 let new_tx = conn.tx;
                 app.acp_tx = new_tx.clone();
                 for agent in app.agents.values_mut() {

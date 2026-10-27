@@ -23,7 +23,11 @@ import { ACPTurn } from "./turn"
 type HandlerContext<Params> = AgentHandlerContext<Params> & { readonly requestId?: JsonRpcId }
 
 // Untraced so request spans parent to the caller's span instead of a setup span that has already ended.
-export const connect = Effect.fnUntraced(function* (client: OpenCodeClient, stream: Stream) {
+export const connect = Effect.fnUntraced(function* (
+  client: OpenCodeClient,
+  stream: Stream,
+  server?: { readonly url: string; readonly password: string },
+) {
   const run = Effect.runPromiseWith(yield* Effect.context<Scope.Scope>())
   const catalog = yield* ACPCatalog.make(client)
   // Requests can dispatch before the service below is built.
@@ -123,7 +127,7 @@ export const connect = Effect.fnUntraced(function* (client: OpenCodeClient, stre
   const capabilities = yield* Ref.make(ACPCapabilities.parse(undefined))
   const turn = yield* ACPTurn.make({ client, connection, sessions, catalog, capabilities })
   yield* Deferred.succeed(ready, {
-    service: ACPService.make({ client, connection, catalog, sessions, capabilities, turn }),
+    service: ACPService.make({ client, connection, catalog, sessions, capabilities, turn, server }),
     connection,
   })
   return acp.agent

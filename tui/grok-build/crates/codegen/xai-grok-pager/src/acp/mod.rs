@@ -95,6 +95,10 @@ pub struct AcpConnection {
     pub is_grok_shell: bool,
     /// Backend capabilities derived from the initialize response.
     pub profile: openbuild_backend::BackendProfile,
+    /// Endpoint the kernel advertised for its optional HTTP side channel.
+    pub(crate) http_feed_server: Option<openbuild_backend::http_feed::Endpoint>,
+    /// Live read-only HTTP side channel, when the kernel advertised one.
+    pub(crate) http_feed: Option<openbuild_backend::http_feed::HttpFeed>,
     /// Auth methods advertised by the agent.
     pub auth_methods: Vec<acp::AuthMethod>,
     /// Cancellation token to stop the agent.
@@ -285,7 +289,24 @@ async fn connect_opencode(
         cancel: bridge.cancel,
         location: AgentLocation::Subprocess(bridge.thread_handle),
     };
-    initialize_connection(endpoint, &flags, auth_manager).await
+    let mut connection = initialize_connection(endpoint, &flags, auth_manager).await?;
+    // The kernel advertises the server that owns this ACP session. Connecting
+    // to it is what makes the side channel see real events; a side-car server
+    // would have its own in-process bus.
+    if openbuild_backend::http_feed::enabled()
+        && let Some(server) = connection.http_feed_server.take()
+    {
+        match openbuild_backend::http_feed::connect(server, None).await {
+            Ok(feed) => {
+                tracing::info!(url = feed.base_url(), "kernel HTTP side channel connected");
+                connection.http_feed = Some(feed);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "kernel HTTP side channel unavailable");
+            }
+        }
+    }
+    Ok(connection)
 }
 
 /// Restart the kernel and re-initialize the connection.
@@ -355,6 +376,8 @@ pub(in crate::acp) async fn initialize_connection(
         cancel_rewind_enabled: agent.cancel_rewind_enabled,
         session_recap_available: agent.session_recap_available,
         feedback_trace_offer: agent.feedback_trace_offer,
+        http_feed_server: agent.http_feed_server,
+        http_feed: None,
         auth_manager,
     })
 }
@@ -528,6 +551,9 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
         // The kernel reads this opt-in and nothing else here. Do not send x.ai\n        // private capabilities to a backend that would reject them.
         return serde_json::json!({
             "opencode/child-session-updates": true,
+            // Ask the kernel for the URL/password of the server that owns this
+            // ACP session, so the optional HTTP feed shares its event bus.
+            "openbuild/http-feed": true,
         });
     }
     let hunk_mode =
@@ -568,6 +594,8 @@ pub(crate) struct InitializedAgent {
     pub(crate) cancel_rewind_enabled: bool,
     pub(crate) session_recap_available: bool,
     pub(crate) feedback_trace_offer: bool,
+    /// Endpoint advertised by the kernel for the optional HTTP side channel.
+    pub(crate) http_feed_server: Option<openbuild_backend::http_feed::Endpoint>,
     /// Raw response used to derive the backend profile (capability truth).
     pub(crate) response: acp::InitializeResponse,
 }
@@ -620,6 +648,7 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
     let feedback_trace_offer = parse_feedback_trace_offer(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
+    let http_feed_server = parse_http_feed_server(resp.meta.as_ref());
     Ok(InitializedAgent {
         models,
         is_grok_shell,
@@ -629,6 +658,7 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
+        http_feed_server,
         response: resp,
     })
 }
@@ -639,6 +669,17 @@ pub fn parse_available_commands(meta: Option<&acp::Meta>) -> Vec<acp::AvailableC
     meta.and_then(|m| m.get("availableCommands"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default()
+}
+
+/// Parse the optional HTTP feed endpoint from `InitializeResponse.meta`.
+///
+/// The kernel only includes `openbuild/httpFeed` when the client opted in, so
+/// a missing value is the normal case for every other ACP client.
+pub(crate) fn parse_http_feed_server(
+    meta: Option<&acp::Meta>,
+) -> Option<openbuild_backend::http_feed::Endpoint> {
+    meta.and_then(|meta| meta.get("openbuild/httpFeed"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 /// Parse `sessionRecap` from `InitializeResponse.meta` (shell rollout gate).
 ///
@@ -902,6 +943,25 @@ mod tests {
     fn parse_available_commands_none_meta_returns_empty() {
         let cmds = parse_available_commands(None);
         assert!(cmds.is_empty());
+    }
+    #[test]
+    fn parses_the_advertised_http_feed_endpoint() {
+        let meta = serde_json::json!({
+            "openbuild/httpFeed": {
+                "url": "http://127.0.0.1:1234",
+                "password": "secret"
+            }
+        });
+        let endpoint = parse_http_feed_server(meta.as_object()).expect("endpoint");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:1234");
+        // base64("opencode:secret")
+        assert_eq!(endpoint.auth_header(), "Basic b3BlbmNvZGU6c2VjcmV0");
+    }
+    #[test]
+    fn missing_or_malformed_http_feed_meta_is_ignored() {
+        assert!(parse_http_feed_server(None).is_none());
+        let meta = serde_json::json!({ "openbuild/httpFeed": "not-an-object" });
+        assert!(parse_http_feed_server(meta.as_object()).is_none());
     }
     #[test]
     fn parse_available_commands_invalid_json_returns_empty() {

@@ -7255,6 +7255,25 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "base64 0.22.1",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "xai-acp-lib",
+]
+
+[[package]]
+name = "openbuild-server"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "clap",
+ "openbuild-backend",
  "serde",
  "serde_json",
  "tokio",

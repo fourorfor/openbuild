@@ -53,9 +53,15 @@ try {
     $editbin = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio" -Recurse -Filter editbin.exe -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($editbin) { & $editbin.FullName /STACK:33554432 $tuiExe | Out-Null }
+
+    Write-Host "== acp server ==" -ForegroundColor Cyan
+    cargo build -p openbuild-server --release
+    if ($LASTEXITCODE -ne 0) { throw "acp server build failed" }
+    Copy-Item "target\release\openbuild-server.exe" (Join-Path $dist "openbuild-server.exe") -Force
 } finally { Pop-Location }
 
 Write-Host "== verify ==" -ForegroundColor Cyan
 & (Join-Path $dist "openbuild-kernel.exe") --version
 & (Join-Path $dist "openbuild.exe") --version
+& (Join-Path $dist "openbuild-server.exe") --version
 Write-Host "artifacts: $dist" -ForegroundColor Green

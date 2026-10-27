@@ -37,7 +37,13 @@ async fn main() -> Result<()> {
     let mut spec = openbuild_backend::spawn::default_spec(Some(kernel.clone()))
         .context("kernel spec could not be resolved")?;
     spec.cwd = cwd.clone();
-    println!("config: {:?}", spec.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_DIR").map(|(_, v)| v));
+    println!(
+        "config: {:?}",
+        spec.env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_DIR")
+            .map(|(_, v)| v)
+    );
     let cancel = CancellationToken::new();
     let bridge = bridge_subprocess(spec, cancel.clone())?;
     let mut rx = bridge.channel.rx;
@@ -53,10 +59,7 @@ async fn main() -> Result<()> {
                     let _ = notification.response_tx.send(Ok(()));
                 }
                 AcpClientMessage::RequestPermission(permission) => {
-                    println!(
-                        "PERMISSION {}",
-                        serde_json::to_string(&permission.request)?
-                    );
+                    println!("PERMISSION {}", serde_json::to_string(&permission.request)?);
                 }
                 other => println!("MESSAGE {other:?}"),
             }
@@ -65,11 +68,9 @@ async fn main() -> Result<()> {
     });
 
     let mut capabilities = acp::ClientCapabilities::new()
-        .fs(
-            acp::FileSystemCapabilities::new()
-                .read_text_file(true)
-                .write_text_file(false),
-        )
+        .fs(acp::FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(false))
         .terminal(false);
     capabilities = capabilities.elicitation(
         acp::ElicitationCapabilities::new().form(acp::ElicitationFormCapabilities::default()),
@@ -87,10 +88,7 @@ async fn main() -> Result<()> {
     )
     .await
     .context("initialize timed out")??;
-    println!(
-        "INITIALIZE {}",
-        serde_json::to_string(&response)?
-    );
+    println!("INITIALIZE {}", serde_json::to_string(&response)?);
     println!(
         "PROFILE {:?}",
         openbuild_backend::BackendProfile::detect(&response, None)
@@ -98,17 +96,11 @@ async fn main() -> Result<()> {
 
     let new_session: acp::NewSessionResponse = tokio::time::timeout(
         Duration::from_secs(30),
-        acp_send(
-            acp::NewSessionRequest::new(cwd.clone()),
-            &bridge.channel.tx,
-        ),
+        acp_send(acp::NewSessionRequest::new(cwd.clone()), &bridge.channel.tx),
     )
     .await
     .context("session/new timed out")??;
-    println!(
-        "SESSION {}",
-        serde_json::to_string(&new_session)?
-    );
+    println!("SESSION {}", serde_json::to_string(&new_session)?);
 
     if let Ok(text) = std::env::var("OPENBUILD_PROMPT") {
         let prompt_id = format!("openbuild-handshake-{}", std::process::id());
@@ -126,10 +118,7 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            Ok(Ok(response)) => println!(
-                "PROMPT {}",
-                serde_json::to_string(&response)?
-            ),
+            Ok(Ok(response)) => println!("PROMPT {}", serde_json::to_string(&response)?),
             Ok(Err(error)) => println!("PROMPT_ERROR {error}"),
             Err(_) => println!("PROMPT_TIMEOUT"),
         }
