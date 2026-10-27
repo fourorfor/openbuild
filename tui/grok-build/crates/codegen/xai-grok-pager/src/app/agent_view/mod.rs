@@ -1279,6 +1279,10 @@ pub struct AgentView {
     /// Cleared to `None` when `detect_plan_mode_change_replayed` confirms real state.
     /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)` so rapid Shift+Tab presses advance correctly without waiting for ACP.
     pub(crate) plan_mode_pending: Option<bool>,
+    /// Confirmed `uncensored` agent selection, mirrored from the kernel's mode option.
+    pub(crate) uncensored_mode_active: bool,
+    /// Optimistic `/uncensored` switch, cleared by the next config-option update.
+    pub(crate) uncensored_mode_pending: Option<bool>,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.

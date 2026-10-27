@@ -91,10 +91,10 @@ pub(crate) fn terminal_marker(input: TerminalMarkerInput<'_>) -> Option<SessionE
     let elapsed = input.elapsed_ms.map(std::time::Duration::from_millis);
     match input.stop {
         TurnStopReason::EndTurn
-        | TurnStopReason::Refusal
         | TurnStopReason::MaxTokens
         | TurnStopReason::MaxTurnRequests
         | TurnStopReason::Unknown => Some(SessionEvent::TurnCompleted { elapsed }),
+        TurnStopReason::Refusal => Some(SessionEvent::TurnRefused { elapsed }),
         TurnStopReason::Cancelled if input.send_now_cancel => None,
         TurnStopReason::Cancelled => Some(cancelled_turn_event(
             input.cancel_trigger,

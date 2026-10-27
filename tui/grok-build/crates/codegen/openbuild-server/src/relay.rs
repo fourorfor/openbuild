@@ -36,6 +36,15 @@ type ExternalSlot = Rc<RefCell<Option<Rc<acp::AgentSideConnection>>>>;
 /// Run the server: spawn a kernel, then serve ACP on stdio until the client
 /// disconnects.
 pub async fn serve(kernel: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<()> {
+    if let openbuild_backend::plugin::InstallOutcome::Failed { path, error } =
+        openbuild_backend::plugin::ensure_uncensored_plugin()
+    {
+        tracing::warn!(
+            path = path.as_ref().map(|path| path.display().to_string()),
+            %error,
+            "uncensored plugin install failed"
+        );
+    }
     let mut spec = openbuild_backend::spawn::default_spec(kernel).context(
         "openbuild kernel not found; set OPENBUILD_KERNEL or put openbuild-kernel.exe next to this executable",
     )?;

@@ -66,6 +66,7 @@ pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
+pub mod uncensored;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -101,6 +102,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         // Steering the work in front of you.
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(plan::PlanCommand),
+        Arc::new(uncensored::UncensoredCommand),
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(memory::MemoryCommand),

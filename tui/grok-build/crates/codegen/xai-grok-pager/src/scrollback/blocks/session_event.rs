@@ -78,6 +78,12 @@ pub enum SessionEvent {
         /// Elapsed time, if available.
         elapsed: Option<Duration>,
     },
+    /// The model or provider refused the request (`stopReason=refusal`).
+    /// OpenBuild itself did not filter; the provider's content policy did.
+    TurnRefused {
+        /// `None` when unknown: do not render `0.0s`.
+        elapsed: Option<Duration>,
+    },
     /// Auto-compaction started (context window threshold reached).
     CompactionStarted {
         /// Percentage of context window used (e.g., 85).
@@ -415,6 +421,20 @@ impl SessionEvent {
             } => {
                 format!("Turn failed: {error}")
             }
+            SessionEvent::TurnRefused {
+                elapsed: Some(elapsed),
+            } => format!(
+                "Model/provider refused this request in {} (stopReason=refusal). \
+                 OpenBuild did not filter it. Switch models with /model, or resend \
+                 after changing provider settings.",
+                format_duration(*elapsed)
+            ),
+            SessionEvent::TurnRefused { elapsed: None } => {
+                "Model/provider refused this request (stopReason=refusal). \
+                 OpenBuild did not filter it. Switch models with /model, or resend \
+                 after changing provider settings."
+                    .to_string()
+            }
             SessionEvent::CompactionStarted { percentage, reason } => {
                 if reason == MODEL_FAMILY_SWITCH_COMPACT_BANNER {
                     MODEL_FAMILY_SWITCH_COMPACT_BANNER.to_string()
@@ -575,6 +595,7 @@ impl SessionEvent {
                 | SessionEvent::RequestFailed { .. }
                 | SessionEvent::RetryFailed { .. }
                 | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnRefused { .. }
                 | SessionEvent::MemoryCommandCompleted {
                     succeeded: false,
                     ..
@@ -592,6 +613,7 @@ impl SessionEvent {
                 | SessionEvent::TurnBlockedByHook { .. }
                 | SessionEvent::TurnHalted { .. }
                 | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnRefused { .. }
         )
     }
 }

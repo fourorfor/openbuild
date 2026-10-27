@@ -696,6 +696,11 @@ pub enum Action {
     /// Set plan mode on/off. Per-session, ACP-mediated (not persisted to config.toml).
     /// `/plan <desc>` uses `EnterPlanMode` instead because it also starts a turn.
     SetPlanMode(PlanModeKind),
+    /// Switch this session to the optional direct content policy (H).
+    /// Session-scoped; never changes the permission mode.
+    SetUncensoredMode(bool),
+    /// Show `/uncensored status`: mode, model, and installed plugin state.
+    ShowUncensoredStatus,
     /// Open the feedback modal (every screen mode).
     /// The payload's images were drained at slash-execution time; the modal composer adopts them as chips.
     OpenFeedbackModal(crate::views::feedback_modal::OpenFeedbackModal),

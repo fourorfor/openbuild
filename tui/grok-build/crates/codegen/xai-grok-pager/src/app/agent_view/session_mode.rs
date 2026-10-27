@@ -35,6 +35,9 @@ impl AgentView {
 
     /// Prompt-row / peek flag for a published non-plan mode. Agent shows none.
     pub(crate) fn published_mode_label(&self) -> Option<&'static str> {
+        if self.uncensored_mode_effective() && !self.effective_session_mode().is_plan() {
+            return Some(crate::views::prompt_widget::UNCENSORED_BADGE);
+        }
         match self.effective_session_mode() {
             SessionMode::Ask => Some(SessionMode::Ask.as_id()),
             SessionMode::Default | SessionMode::Plan => None,
@@ -54,5 +57,17 @@ impl AgentView {
     pub(crate) fn stage_session_mode(&mut self, mode: SessionMode) {
         self.stage_plan_mode(mode.is_plan());
         self.session_mode_pending = Some(mode);
+    }
+
+    /// Confirmed `uncensored` state, or the optimistic switch while one is in flight.
+    pub(crate) fn uncensored_mode_effective(&self) -> bool {
+        self.uncensored_mode_pending
+            .unwrap_or(self.uncensored_mode_active)
+    }
+
+    /// Mirror the kernel's `mode` config option. Also clears an optimistic pick.
+    pub(crate) fn set_uncensored_mode_from_kernel(&mut self, active: bool) {
+        self.uncensored_mode_active = active;
+        self.uncensored_mode_pending = None;
     }
 }

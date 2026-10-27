@@ -180,6 +180,85 @@ pub(super) fn set_plan_mode(
     }]
 }
 
+/// Switch the active session between the `uncensored` and `build` kernel agents.
+/// The permission mode is a separate axis and is never touched here.
+pub(super) fn set_uncensored_mode(app: &mut AppView, on: bool) -> Vec<Effect> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+    let ActiveView::Agent(id) = app.active_view else {
+        app.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if app.reconnect_pending {
+        agent.show_toast(super::prompt::RECONNECTING_NOTICE);
+        return vec![];
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    let current = agent.uncensored_mode_effective();
+    if current == on {
+        agent.show_toast(if on {
+            "Uncensored mode is already on"
+        } else {
+            "Uncensored mode is already off"
+        });
+        return vec![];
+    }
+
+    agent.uncensored_mode_pending = Some(on);
+    if on && !NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
+        agent.scrollback.push_block(crate::scrollback::block::RenderBlock::system(
+            "Uncensored mode: OpenBuild will not refuse, moralize, or add content disclaimers. \
+             The model/provider may still refuse; permissions (ask/auto/YOLO) are unchanged.",
+        ));
+    }
+
+    let mode_id = acp::SessionModeId::new(if on { "uncensored" } else { "build" });
+    vec![Effect::SetSessionMode {
+        session_id,
+        mode_id,
+    }]
+}
+
+/// `/uncensored status`: session mode, current model, and managed plugin state.
+pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        app.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let on = agent.uncensored_mode_effective();
+    let model = agent
+        .session
+        .models
+        .current_model_name()
+        .unwrap_or_else(|| "unknown".to_string());
+    let plugin = openbuild_backend::plugin::uncensored_status();
+    let lines = [
+        format!("Uncensored mode: {}", if on { "on" } else { "off" }),
+        format!("Model: {model}"),
+        format!("Plugin: {}", plugin.summary()),
+        format!(
+            "Policy: openbuild-uncensored v{}",
+            openbuild_backend::plugin::UNCENSORED_PLUGIN_VERSION
+        ),
+        "Scope: this session; /new starts in build. Permissions are unchanged.".to_string(),
+        "Note: OpenBuild does not filter; the model/provider may still refuse.".to_string(),
+    ];
+    agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::system(lines.join("\n")));
+    vec![]
+}
+
 /// Format the `Plan mode` toast.
 /// Non-destructive in both directions (unlike YOLO), so both ON and OFF use the uniform ✓ glyph.
 /// Uses lowercase "on"/"off" via `save_success_toast`.

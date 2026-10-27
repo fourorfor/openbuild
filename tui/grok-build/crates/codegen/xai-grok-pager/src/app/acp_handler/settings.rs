@@ -50,6 +50,9 @@ pub(super) fn apply_config_options(
         // the kernel's mode ids are `build` / `plan`. Record the label so a mode
         // switch shows up without a round trip.
         agent.session.set_backend_mode_label(mode_id);
+        agent.set_uncensored_mode_from_kernel(
+            mode.current == openbuild_backend::plugin::UNCENSORED_AGENT_ID,
+        );
     }
 
     agent.refresh_context_total();

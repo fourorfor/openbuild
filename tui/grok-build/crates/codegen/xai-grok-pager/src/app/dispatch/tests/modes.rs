@@ -2705,3 +2705,87 @@ fn create_session_with_published_modes(app: &mut AppView) -> Vec<Effect> {
         app,
     )
 }
+
+#[test]
+fn uncensored_on_switches_to_the_uncensored_agent() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetUncensoredMode(true), &mut app);
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::SetSessionMode { mode_id, .. }) if &*mode_id.0 == "uncensored"
+        ),
+        "expected SetSessionMode(uncensored), got: {effects:?}"
+    );
+    let agent = test_agent(&app, AgentId(0));
+    assert_eq!(agent.uncensored_mode_pending, Some(true));
+    assert_eq!(
+        agent.published_mode_label(),
+        Some(crate::views::prompt_widget::UNCENSORED_BADGE)
+    );
+}
+
+#[test]
+fn uncensored_off_returns_to_build() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    let effects = dispatch(Action::SetUncensoredMode(false), &mut app);
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::SetSessionMode { mode_id, .. }) if &*mode_id.0 == "build"
+        ),
+        "expected SetSessionMode(build), got: {effects:?}"
+    );
+    let agent = test_agent(&app, AgentId(0));
+    assert_eq!(agent.uncensored_mode_pending, Some(false));
+    assert_eq!(agent.published_mode_label(), None);
+}
+
+#[test]
+fn uncensored_toggle_is_idempotent() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    let effects = dispatch(Action::SetUncensoredMode(true), &mut app);
+    assert!(effects.is_empty(), "expected no ACP round-trip, got: {effects:?}");
+    assert_eq!(
+        test_agent(&app, AgentId(0)).uncensored_mode_pending,
+        None
+    );
+}
+
+#[test]
+fn failed_uncensored_switch_clears_the_optimistic_state() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::SetUncensoredMode(true), &mut app);
+    assert_eq!(
+        test_agent(&app, AgentId(0)).uncensored_mode_pending,
+        Some(true)
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SetSessionModeFailed {
+            session_id: "test-session".into(),
+        }),
+        &mut app,
+    );
+
+    let agent = test_agent(&app, AgentId(0));
+    assert_eq!(agent.uncensored_mode_pending, None);
+    assert_eq!(agent.published_mode_label(), None);
+    assert!(agent.toast.is_some(), "the failure must be visible");
+}
+
+#[test]
+fn uncensored_status_reports_mode_and_plugin() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    let effects = dispatch(Action::ShowUncensoredStatus, &mut app);
+    assert!(effects.is_empty());
+
+    let text = last_system_text(&app, AgentId(0));
+    assert!(text.contains("Uncensored mode: on"), "{text}");
+    assert!(text.contains("Plugin:"), "{text}");
+    assert!(text.contains("Permissions are unchanged"), "{text}");
+    assert!(text.contains("may still refuse"), "{text}");
+}

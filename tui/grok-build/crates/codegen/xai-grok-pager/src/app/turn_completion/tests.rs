@@ -1416,9 +1416,12 @@ fn classifier_completed_without_elapsed_is_none() {
 }
 
 #[test]
-fn classifier_refusal_max_tokens_max_requests_unknown_are_completed() {
+fn classifier_refusal_is_refused_and_other_stops_are_completed() {
+    assert!(matches!(
+        terminal_marker(base_input(TurnStopReason::Refusal)),
+        Some(SessionEvent::TurnRefused { .. })
+    ));
     for stop in [
-        TurnStopReason::Refusal,
         TurnStopReason::MaxTokens,
         TurnStopReason::MaxTurnRequests,
         TurnStopReason::Unknown,
@@ -1569,4 +1572,42 @@ fn viewer_finalize_truncation_wire_pair_renders_exact_user_copy() {
         }
         other => panic!("expected TurnFailed, got {other:?}"),
     }
+}
+
+#[test]
+fn viewer_finalize_refusal_pushes_a_visible_refused_marker() {
+    let mut agent = running_viewer("p1");
+    let outcome = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("refusal"),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(outcome, TerminalApply::ViewerFinalized));
+    assert!(agent.session.state.is_idle());
+
+    let event = last_session_event(&agent.scrollback).expect("refusal marker");
+    assert!(matches!(event, SessionEvent::TurnRefused { .. }));
+    let text = event.message();
+    assert!(text.contains("Model/provider refused"), "{text}");
+    assert!(text.contains("/model"), "{text}");
+    assert!(text.contains("stopReason=refusal"), "{text}");
+}
+
+#[test]
+fn refusal_is_no_longer_reported_as_completed() {
+    let marker = terminal_marker(TerminalMarkerInput {
+        stop: TurnStopReason::Refusal,
+        elapsed_ms: Some(1500),
+        agent_result: None,
+        send_now_cancel: false,
+        cancel_trigger: None,
+        cancellation_category: None,
+        error_kind: None,
+        error_banner_present: false,
+    });
+    assert!(matches!(marker, Some(SessionEvent::TurnRefused { .. })));
 }

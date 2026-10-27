@@ -32,7 +32,8 @@ use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
 use super::modes::{
     dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
-    set_permission_mode, set_plan_mode, set_yolo_mode,
+    set_permission_mode, set_plan_mode, set_uncensored_mode, set_yolo_mode,
+    show_uncensored_status,
 };
 use super::notes::{
     dispatch_enter_remember_mode, dispatch_open_feedback_modal,
@@ -1116,6 +1117,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
+        Action::SetUncensoredMode(on) => set_uncensored_mode(app, on),
+        Action::ShowUncensoredStatus => show_uncensored_status(app),
         Action::OpenFeedbackModal(open) => dispatch_open_feedback_modal(app, open),
         Action::SubmitFeedbackModal { modal_id } => dispatch_submit_feedback_modal(app, modal_id),
         Action::RequestFeedbackDraft { request } => {

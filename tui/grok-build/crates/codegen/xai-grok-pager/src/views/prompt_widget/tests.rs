@@ -4130,6 +4130,11 @@
         let flags = mode_flags(Some(ask), PermissionLabel::Ask, &theme);
         assert_eq!(at(&flags, 0).color, Some(theme.accent_success));
         assert_ne!(at(&flags, 0).color, Some(theme.accent_plan));
+
+        // The uncensored badge is a third axis: it must not borrow the plan accent.
+        let flags = mode_flags(Some(UNCENSORED_BADGE), PermissionLabel::Ask, &theme);
+        assert_eq!(at(&flags, 0).text, UNCENSORED_BADGE);
+        assert_eq!(at(&flags, 0).color, Some(theme.accent_system));
     }
 
     /// The "plan" mode flag on the bottom divider keeps its accent color on the terminal theme: the

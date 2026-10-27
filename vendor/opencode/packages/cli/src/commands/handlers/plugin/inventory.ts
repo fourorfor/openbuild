@@ -19,7 +19,18 @@ export const inspect = Effect.fn("cli.plugin.inspect")(function* (selected?: str
   const { endpoint } = yield* ServerConnection.resolve()
   const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
   const location = { directory: process.cwd() }
-  const listed = yield* Effect.promise(() => client.plugin.list({ location }))
+  // A cold server activates plugins after it starts serving. `plugin check`
+  // must not report "none" while the plugin supervisor is still loading, or a
+  // failed local plugin would look identical to an empty config.
+  const listed = yield* Effect.promise(async () => {
+    const deadline = Date.now() + 2_000
+    let response = await client.plugin.list({ location })
+    while (response.data.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      response = await client.plugin.list({ location })
+    }
+    return response
+  })
   const serverTargets = new Set(
     listed.data.flatMap((plugin) => (plugin.source.type === "package" ? [plugin.source.target] : [])),
   )
@@ -28,15 +39,23 @@ export const inspect = Effect.fn("cli.plugin.inspect")(function* (selected?: str
       ? yield* Effect.promise(() => client.plugin.check({ location, ...(selected ? { target: selected } : {}) }))
       : listed
   const serverItems = server.data.flatMap((plugin): Item[] => {
-    if (plugin.source.type !== "package") return []
-    if (selected !== undefined && plugin.source.target !== selected) return []
+    if (plugin.source.type === "builtin") return []
+    const target =
+      plugin.source.type === "package"
+        ? plugin.source.target
+        : plugin.source.type === "local"
+          ? plugin.source.path
+          : plugin.source.type
+    if (selected !== undefined && target !== selected && plugin.id !== selected) return []
     return [
       {
         runtime: "Server",
-        target: plugin.source.target,
-        name: plugin.id ?? plugin.source.target,
-        ...(plugin.source.version ? { version: displayVersion(plugin.source.version) } : {}),
-        outdated: plugin.source.outdated === true,
+        target,
+        name: plugin.id ?? target,
+        ...(plugin.source.type === "package" && plugin.source.version
+          ? { version: displayVersion(plugin.source.version) }
+          : {}),
+        outdated: plugin.source.type === "package" && plugin.source.outdated === true,
         ...(plugin.state.status === "failed" ? { error: plugin.state.error } : {}),
       },
     ]

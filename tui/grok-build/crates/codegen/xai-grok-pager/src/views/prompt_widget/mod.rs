@@ -299,6 +299,10 @@ pub struct PromptFlag<'a> {
     pub bold: bool,
 }
 
+/// Badge for the optional direct content policy (`/uncensored`).
+/// Kept here so the agent view and the prompt flags use one literal.
+pub const UNCENSORED_BADGE: &str = "无审查";
+
 /// Info-line mode flags shared by the chat prompt and the dashboard peek badge: mode label, then permission.
 /// Mode and permission are independent axes, so neither hides the other.
 pub fn mode_flags<'a>(
@@ -308,9 +312,12 @@ pub fn mode_flags<'a>(
 ) -> Vec<PromptFlag<'a>> {
     let mut flags = Vec::new();
     if let Some(text) = mode_label {
-        // Ask must stay distinct from the plan-family accent.
+        // Ask must stay distinct from the plan-family accent; the content-policy
+        // badge is a third axis and gets the system accent.
         let color = if text == SessionMode::Ask.as_id() {
             theme.accent_success
+        } else if text == UNCENSORED_BADGE {
+            theme.accent_system
         } else {
             theme.accent_plan
         };

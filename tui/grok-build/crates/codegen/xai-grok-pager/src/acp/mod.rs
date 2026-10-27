@@ -272,6 +272,31 @@ async fn connect_opencode(
     let auth_manager =
         spawn::boot_auth_manager(&xai_grok_shell::util::grok_home::grok_home(), &agent_config);
 
+    // The managed `/uncensored` plugin must exist before the kernel starts so
+    // its agent is in the first ACP catalog. A failure here is reported and
+    // does not block the normal build agent.
+    match openbuild_backend::plugin::ensure_uncensored_plugin() {
+        openbuild_backend::plugin::InstallOutcome::Installed { path, updated } => {
+            tracing::info!(path = %path.display(), updated, "uncensored plugin ready");
+        }
+        openbuild_backend::plugin::InstallOutcome::Unmanaged { path } => {
+            tracing::warn!(
+                path = %path.display(),
+                "uncensored plugin path holds an unmanaged file; leaving it untouched"
+            );
+        }
+        openbuild_backend::plugin::InstallOutcome::NoConfigDir => {
+            tracing::debug!("uncensored plugin not installed: no config directory");
+        }
+        openbuild_backend::plugin::InstallOutcome::Failed { path, error } => {
+            tracing::warn!(
+                path = path.as_ref().map(|path| path.display().to_string()),
+                %error,
+                "uncensored plugin install failed"
+            );
+        }
+    }
+
     let spec = openbuild_backend::spawn::default_spec(kernel_path).ok_or_else(|| {
         anyhow::anyhow!(
             "openbuild kernel not found; set OPENBUILD_KERNEL or place openbuild-kernel.exe next to this executable"

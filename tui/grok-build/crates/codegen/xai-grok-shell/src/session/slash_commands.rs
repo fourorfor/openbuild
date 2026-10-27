@@ -542,6 +542,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "tutorial",
     "t",
     "undo",
+    "uncensored",
     "usage",
     "view-plan",
     "vim-mode",

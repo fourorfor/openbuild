@@ -12,17 +12,18 @@ openbuild-kernel.exe (Bun)
 OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 
-本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连。
+本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连；H 无审查模式 v1 已落地。
 
 ## 当前状态
 
 已通过真实运行验证：
 
 - `openbuild-kernel.exe acp` 能响应 `initialize`，返回 `agentCapabilities`、9 个可用模型、3 个命令。
-- `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）。
+- `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）；安装 H 插件后 mode 为 `build` / `plan` / `uncensored`。
 - Rust 侧子进程桥 `openbuild-backend` 能完成 `initialize → session/new` 往返。
-- `cargo test -p openbuild-backend`：59 个单测全部通过（含子智能体与 HTTP feed 用例）。
-- `cargo check -p xai-grok-pager`：通过。
+- `cargo test -p openbuild-backend`：66 个单测全部通过（含子智能体、HTTP feed 与 H 插件安装器）。
+- H 插件 Bun 单测：3 pass；真实内核 `plugin check` 对 managed 插件返回 `openbuild.uncensored (current)`，对坏插件返回 `check failed` 且 exit 1。
+- `cargo check -p xai-grok-pager`：通过；`/uncensored` 相关 lib 单测 9 pass。
 - `cargo build -p openbuild-server --release`：通过；`openbuild-server --version` → `openbuild-server 0.1.0`。
 - `bun run typecheck`（packages/cli）：通过（1,886 文件）。
 
@@ -71,12 +72,13 @@ openbuild/
 ├── run.ps1                # 启动 TUI（自动指向 dist 内核）
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
 ├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
-├── patches/               # 两个上游仓库的完整改动（可复现）
+├── patches/               # 两个上游仓库的完整改动（15 个补丁，可复现）
+├── tests/                 # H 无审查插件的 Bun 单测
 ├── vendor/opencode/       # 内核源码 @ b2526211ec
 └── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
 ```
 
-`patches/` 里是 13 个按主题拆分的补丁（内核 4 个 + TUI 9 个），
+`patches/` 里是 15 个按主题拆分的补丁（内核 5 个 + TUI 10 个），
 应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始
@@ -315,7 +317,8 @@ NOTIFY {"_meta":{"eventId":"ses_...-1","promptId":"openbuild-handshake-29200","s
 PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 ```
 
-- `cargo test -p openbuild-backend`：59 passed（含 9 个 `adapter::child` 用例与 HTTP feed 用例）。
+- `cargo test -p openbuild-backend`：66 passed（含 9 个 `adapter::child` 用例、HTTP feed 与 H 插件安装器用例）。
+- `bun test openbuild/tests/uncensored-plugin.test.ts`：3 passed（H 策略追加与 agent 注册）。
 - `cargo run -p openbuild-backend --example crash`：`PASS kernel exit detected (code: Some(1))` + `PASS a user stop stays a user stop`。
 - `cargo build -p openbuild-server --release`：Finished；`openbuild-server --version` → `openbuild-server 0.1.0`。
 - `cargo run -p openbuild-server --example relay -- <kernel> <cwd>`：`INITIALIZE agent=OpenCode` → `SESSION ses_...` → `PROMPT stopReason=EndTurn updates=3` → PASS。
@@ -323,7 +326,7 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 - `cargo test -p xai-grok-update`：137 passed。
 - `cargo check -p xai-grok-pager`：Finished。
 - `bun run typecheck`（packages/cli）：No type errors in 1,886 files。
-- `cargo test -p xai-grok-pager --lib`：**10,101 passed / 104 failed**（失败集合与改动前逐条一致，全部为 Windows 平台差异，见「已知限制」）。跑之前必须设 `OPENBUILD_KERNEL` 指向真实内核，否则会多一个环境依赖失败（10,100 / 105）。
+- `cargo test -p xai-grok-pager --lib`：上一轮基线 **10,101 passed / 104 failed**（失败集合与改动前逐条一致，全部为 Windows 平台差异，见「已知限制」）；本轮新增的 `/uncensored` 与拒绝终态测试单独跑过。跑之前必须设 `OPENBUILD_KERNEL` 指向真实内核，否则会多一个环境依赖失败（10,100 / 105）。
 - 内核 `--version`：`opencode v2.1.4`（内核自身版本号沿用上游标识，不影响 UI 品牌）。
 - TUI `--version`：`openbuild 1.0.45`。
 
@@ -351,6 +354,34 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 
   品牌相关模块全部通过：`views::welcome` 105、`views::settings_modal` 190、
   `views::privacy_banner` 5、`branding` 2、`notifications::protocol` 14。
+
+## H 无审查模式（v1）
+
+默认关闭、按会话生效的内容策略模式。开启后 agent 不因内容本身拒绝、不说教、
+不附加免责声明；工具权限、沙箱与系统边界不变。
+
+- `/uncensored on|off|status`：切换本会话的 `uncensored` / `build` agent。
+- 状态行出现 `无审查` 徽标，与 `YOLO` / `计划` 并列；权限轴独立。
+- `stopReason=refusal` 显示为 `TurnRefused` 警告终态，提示 `/model` 换模型或改
+  provider 后重发，不再静默显示“完成”。
+- 插件源码内嵌在 `openbuild-backend`，启动时写入内核实际读取的配置目录
+  （`OPENCODE_CONFIG_DIR`、已有的 `~/.config/openbuild` 或 `~/.config/opencode`）
+  的 `plugin/openbuild-uncensored.ts`；managed 副本自动升级，用户文件不覆盖。
+- `/kernel plugin check` 可查看本地插件是 `current` 还是 `check failed`。
+
+v1 未做：插件 `model` 绑定、子智能体继承、自动重试、文本级拒绝启发式。
+OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝。
+设计见 [`docs/openbuild-uncensored-mode.md`](../docs/openbuild-uncensored-mode.md)。
+
+## 路线图（未实现）
+
+以下功能已有设计但**尚未落地**，不要按已交付能力使用：
+
+- **G 的 UI 消费**：`session.diff` 的 diff 视图与完整 usage 的用量面板。
+- **E 多 profile 并行**：与「一个 TUI 只连一个内核」的当前约束冲突，需先做范围决策。
+- **H v1.1**：模型绑定、子智能体继承、自动重试；v1 已可用。
+
+完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)。
 
 ## 许可证
 

@@ -15,6 +15,7 @@ pub mod adapter;
 pub mod config;
 pub mod health;
 pub mod http_feed;
+pub mod plugin;
 pub mod profile;
 pub mod spawn;
 pub mod transport;

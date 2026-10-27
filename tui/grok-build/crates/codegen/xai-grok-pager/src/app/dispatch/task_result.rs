@@ -919,9 +919,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SetSessionModeFailed { session_id } => {
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, session_id.0.as_ref()) {
+                let was_uncensored = agent.uncensored_mode_pending.is_some();
                 agent.plan_mode_pending = None;
                 agent.session_mode_pending = None;
+                agent.uncensored_mode_pending = None;
                 agent.pending_post_turn_commit = None;
+                if was_uncensored {
+                    agent.show_toast(
+                        "Uncensored mode is unavailable. Run /kernel plugin check, then /reconnect.",
+                    );
+                }
             }
             vec![]
         }

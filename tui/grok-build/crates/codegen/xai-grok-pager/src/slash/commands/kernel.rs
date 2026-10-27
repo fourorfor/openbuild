@@ -10,6 +10,7 @@
 //! Subcommands:
 //!
 //! - `/kernel plugin list` — installed plugins (global + project)
+//! - `/kernel plugin check` — loaded state and update status for each plugin
 //! - `/kernel plugin add <spec>` — install a plugin package
 //! - `/kernel plugin remove <name>` — uninstall
 //! - `/kernel mcp list` — configured MCP servers
@@ -67,6 +68,11 @@ impl SlashCommand for KernelCommand {
         };
         Some(vec![
             item("plugin list", "plugin list", "List installed kernel plugins"),
+            item(
+                "plugin check",
+                "plugin check",
+                "Check loaded state and updates for kernel plugins",
+            ),
             item("plugin add", "plugin add ", "Install a kernel plugin package"),
             item("plugin remove", "plugin remove ", "Uninstall a kernel plugin"),
             item("mcp list", "mcp list", "List configured MCP servers"),
@@ -117,17 +123,17 @@ impl SlashCommand for KernelCommand {
             "plugin" => {
                 let Some(verb) = rest.first() else {
                     return CommandResult::Error(
-                        "Usage: /kernel plugin <list|add|remove> [...]".to_string(),
+                        "Usage: /kernel plugin <list|check|add|remove> [...]".to_string(),
                     );
                 };
                 match *verb {
-                    "list" | "add" | "remove" => {
+                    "list" | "check" | "add" | "remove" => {
                         let mut argv: Vec<&str> = vec!["plugin"];
                         argv.extend(rest.iter().copied());
                         CommandResult::Message(run_kernel(&kernel, &argv))
                     }
                     other => CommandResult::Error(format!(
-                        "Unknown plugin verb: {other}. Use list, add, or remove."
+                        "Unknown plugin verb: {other}. Use list, check, add, or remove."
                     )),
                 }
             }
