@@ -33,6 +33,7 @@ pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
 pub mod jump;
+pub mod kernel;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
@@ -125,6 +126,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         // Extending the agent.
         Arc::new(plugin::SkillsCommand),
         Arc::new(mcps::McpsCommand),
+        Arc::new(kernel::KernelCommand),
         Arc::new(plugin::HooksCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(workflow::WorkflowCommand),

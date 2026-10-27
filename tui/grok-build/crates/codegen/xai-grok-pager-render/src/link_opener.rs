@@ -299,7 +299,10 @@ pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
 mod tests {
     use super::*;
 
+    // `build_open_path_command` is Unix-only (`Windows` goes through Explorer),
+    // so this assertion has nothing to inspect on Windows.
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn open_path_command_passes_path_as_a_single_arg() {
         // Path with spaces must be one argument, never shell-interpolated.
         let path = std::path::Path::new("/tmp/grok session/image 1.jpg");

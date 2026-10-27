@@ -68,9 +68,12 @@ openbuild/
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
 ├── dist/                  # openbuild.exe / openbuild-kernel.exe
 ├── patches/               # 两个上游仓库的完整改动（可复现）
-├── vendor/opencode/       # 内核源码 @ b252621 + P1–P3
+├── vendor/opencode/       # 内核源码 @ b2526211ec
 └── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend
 ```
+
+`patches/` 里是 12 个按主题拆分的补丁（内核 4 个 + TUI 8 个），
+应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始
 
@@ -130,6 +133,7 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 | `OPENBUILD_BACKEND` | `opencode` 强制走子进程；`grok` 强制走原 grok shell；未设置时若同目录存在内核则自动走 opencode |
 | `OPENBUILD_KERNEL` | 内核可执行文件路径 |
 | `OPENBUILD_PROMPT` | 仅 handshake 示例使用：发送一轮 prompt |
+| `OPENBUILD_THEME_DIR` | 覆盖导入主题的存放目录（默认 `~/.grok/themes`） |
 | `PROTOC` | 构建期 protoc 路径（Windows 必需） |
 | `OPENCODE_VERSION` | 构建内核时覆盖版本号（本仓库使用 `2.1.4`，避免 detached 版本触发 free-tier 门槛） |
 
@@ -138,6 +142,103 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 输入 `/backend` 会打印当前后端、内核路径和已声明能力。能力决定菜单项是否存在：
 `config options` 关闭时模型/模式切换会退回 `session/set_model`，`queue extension`
 关闭时 `/queue` 不可用，等等。排查「某个功能不见了」时先看这里。
+
+## 接入第三方模型提供商
+
+内置模型之外的服务（OpenAI 兼容中转站、自建网关、Ollama / vLLM 本地推理、
+OpenRouter 等）通过内核配置文件接入，**不需要改 TUI**：
+
+```powershell
+notepad "$env:USERPROFILE\.config\opencode\openbuild.jsonc"
+```
+
+> 文件名是 `openbuild.jsonc`（本分支已从 `opencode.jsonc` 改名），
+> 旧名仍兼容读取但优先级更低。把配置放到 `%USERPROFILE%\.config\openbuild\`
+> 也可以 —— TUI 启动时发现该目录存在就会自动指向它。
+
+```jsonc
+{
+  "providers": {
+    "myprovider": {
+      "name": "My Provider",
+      "activation": "enabled",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": ["MY_API_KEY"],
+      "settings": { "baseURL": "https://api.example.com/v1" },
+      "models": {
+        "my-model": { "name": "My Model", "limit": { "context": 128000, "output": 16384 } }
+      }
+    }
+  },
+  "model": "myprovider/my-model"
+}
+```
+
+验证：
+
+```powershell
+"{}" | .\dist\openbuild-kernel.exe models   # 应出现 myprovider/my-model
+```
+
+两个最容易踩的坑：
+
+- **`activation: "enabled"` 不能省**。只写 `settings.apiKey` 而省略 `activation`
+  时 provider 会被静默隐藏（已实测）。
+- **删除 provider 不会立即生效**。内核常驻背景服务是单向热加载：新增立即出现，
+  删除仍会列出。要清掉旧条目跑 `openbuild-kernel service restart`。
+
+完整字段说明、各服务商配方、排错表见 [`docs/openbuild-providers.md`](../docs/openbuild-providers.md)。
+
+## 主题：导入 opencode / VSCode 配色
+
+内置主题之外，可以直接导入外部主题文件。支持三种格式：
+
+| 格式 | 识别依据 | 例子 |
+| --- | --- | --- |
+| opencode TUI（v1） | 顶层 `theme` 对象 | `vendor/opencode/packages/theme/` 的 `*.json` |
+| opencode 桌面主题 | 顶层 `light` / `dark` + `palette` | `vendor/opencode/packages/ui/src/theme/themes/*.json` |
+| VSCode 主题 | 顶层 `colors` 对象 | 任意 VSCode `*-color-theme.json` |
+
+```text
+/theme import ~/themes/catppuccin.json    # 转换 + 保存 + 立即应用
+/theme list                               # 列出内置与已导入，标出当前生效的
+/theme catppuccin                         # 以后按 slug 切回
+/theme grokday                            # 切回内置主题（同时撤下导入覆盖）
+```
+
+导入的主题落在 `~/.grok/themes/<slug>.json`，选择记录在 `~/.grok/themes/active`；
+两者都可用 `OPENBUILD_THEME_DIR` 改到别处。
+
+两个实现上的要点：
+
+- **透明色会被合成到背景上**，而不是直接丢弃 alpha。VSCode 常用 `#RRGGBBAA`
+  表达叠层，丢 alpha 会把 10% 的红色叠层变成纯红，diff 行会看起来像报错。
+- **导入主题不新增 `ThemeKind` 变体**。`ThemeKind` 是 `Copy`、被十几处穷尽匹配、
+  并以 `as u8` 存进原子变量；导入主题改用一个运行时覆盖层（`theme::custom`）
+  叠在当前选中主题之上，渲染管线（对比度增强、量化、ANSI16 降级）完全复用。
+  代价是主题选择器里预览内置主题时会临时挂起覆盖层，否则每行看起来都一样。
+
+## 插件与 MCP：`/kernel`
+
+内核本身已有 `plugin` / `mcp` 子命令，TUI 不重复实现，直接调用并展示结果：
+
+```text
+/kernel                       # 同时列出插件与 MCP 服务器
+/kernel plugin list
+/kernel plugin add <package>
+/kernel plugin remove <name>
+/kernel mcp list
+/kernel mcp add <name> -- <command...>
+/kernel mcp add <name> --url <url>
+/kernel mcp remove <name>
+/kernel restart               # 重启内核服务，让「删除」生效
+```
+
+> **为什么需要 `/kernel restart`**：内核的常驻服务是单向热加载 —— 新增插件或
+> provider 立即生效，**删除不会**。这与 provider 的行为一致（见上一节）。
+
+内核可执行文件按 `OPENBUILD_KERNEL` → TUI 同目录 的顺序查找，与启动时一致。
+每个命令都有 120 秒超时保护：`plugin add` 可能要走网络，但内核卡死不应该连带卡住 TUI。
 
 ## 内核崩溃与 `/reconnect`
 
@@ -183,12 +284,13 @@ NOTIFY {"_meta":{"eventId":"ses_...-1","promptId":"openbuild-handshake-29200","s
 PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 ```
 
-- `cargo test -p openbuild-backend`：35 passed。
+- `cargo test -p openbuild-backend`：38 passed。
 - `cargo run -p openbuild-backend --example crash`：`PASS kernel exit detected (code: Some(1))` + `PASS a user stop stays a user stop`。
+- `cargo test -p xai-grok-pager-render`：1,163 passed / 31 failed（共 1,194，31 个均为 Windows 平台差异，与改动前逐条一致）。
 - `cargo test -p xai-grok-update`：137 passed。
 - `cargo check -p xai-grok-pager`：Finished。
 - `bun run typecheck`（packages/cli）：No type errors in 1,886 files。
-- `cargo test -p xai-grok-pager --lib`：**10,090 passed / 104 failed**（失败集合与改动前逐条一致，全部为 Windows 平台差异，见「已知限制」）。
+- `cargo test -p xai-grok-pager --lib`：**10,101 passed / 104 failed**（失败集合与改动前逐条一致，全部为 Windows 平台差异，见「已知限制」）。跑之前必须设 `OPENBUILD_KERNEL` 指向真实内核，否则会多一个环境依赖失败（10,100 / 105）。
 - 内核 `--version`：`opencode v2.1.4`（内核自身版本号沿用上游标识，不影响 UI 品牌）。
 - TUI `--version`：`openbuild 1.0.45`。
 

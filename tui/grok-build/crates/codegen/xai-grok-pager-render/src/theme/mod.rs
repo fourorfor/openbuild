@@ -9,9 +9,11 @@
 
 pub mod cache;
 pub mod color_support;
+pub mod custom;
 pub mod env_appearance;
 mod grokday;
 mod groknight;
+pub mod import;
 pub mod md_style;
 pub mod osc11;
 mod oscura;
@@ -311,6 +313,12 @@ impl Theme {
             // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
             ThemeKind::Auto => Self::groknight(),
         };
+        // An imported theme shadows the built-in palette. This sits after the
+        // terminal-native early returns on purpose: `terminal` means "use the
+        // host palette", which an imported file cannot honour, so the lock wins.
+        // The rest of the pipeline (contrast boost, quantization, ANSI16
+        // overrides) applies unchanged, since an imported theme is just RGB.
+        let base = custom::active().map_or(base, |active| active.theme);
         // Sample polarity before quantizing
         // After quantization `bg_base` may land on a named or indexed entry whose luminance depends on the host palette
         let dark = base.is_dark();

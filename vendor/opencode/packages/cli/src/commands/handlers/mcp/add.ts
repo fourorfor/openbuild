@@ -38,11 +38,17 @@ export default Runtime.handler(
 )
 
 export async function resolveConfigPath(directory: string) {
+  // Highest priority last, matching ConfigDiscovery.names. The project directory
+  // stays `.opencode` because that is the only directory discovery scans.
   const candidates = [
     path.join(directory, "opencode.json"),
     path.join(directory, "opencode.jsonc"),
+    path.join(directory, "openbuild.json"),
+    path.join(directory, "openbuild.jsonc"),
     path.join(directory, ".opencode", "opencode.json"),
     path.join(directory, ".opencode", "opencode.jsonc"),
+    path.join(directory, ".opencode", "openbuild.json"),
+    path.join(directory, ".opencode", "openbuild.jsonc"),
   ]
   for (const candidate of candidates) {
     if (

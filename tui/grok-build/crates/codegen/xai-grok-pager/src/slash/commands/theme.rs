@@ -6,13 +6,22 @@
 //!
 //! `run` dispatches `Action::SetTheme(<canonical>)`; the dispatcher handles the state change, persistence, and the toast.
 //! `preview_arg` and `cancel_preview` call `Theme::apply_kind` directly so a preview never persists: no toast or disk write per keystroke.
+//!
+//! Three verbs extend the built-in catalog with imported themes:
+//!
+//! - `/theme import <path>` converts an opencode or VSCode theme file and installs it as the active palette.
+//! - `/theme list` prints the built-in kinds and every imported theme on disk.
+//! - `/theme <slug>` selects an already-imported theme by its slug.
+//!
+//! Imported themes are not `ThemeKind`s: see [`crate::theme::custom`] for why a
+//! runtime-sized enum variant would ripple through the whole renderer.
 
 use crate::app::actions::Action;
 use crate::slash::command::{
     AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
 };
 use crate::slash::{ModeSupport, Remedy};
-use crate::theme::{Theme, ThemeKind, cache as theme_cache};
+use crate::theme::{Theme, ThemeKind, cache as theme_cache, custom};
 
 pub struct ThemeCommand;
 
@@ -48,6 +57,9 @@ impl SlashCommand for ThemeCommand {
 
     fn preview_arg(&self, arg: &str) {
         if let Some(kind) = ThemeKind::from_name(arg) {
+            // A built-in kind is being previewed, so hide any imported override;
+            // without this every row would look identical.
+            custom::suspend();
             if kind.is_auto() {
                 // Preview the theme that auto mode would resolve to.
                 let resolved = theme_cache::resolve_auto();
@@ -55,10 +67,16 @@ impl SlashCommand for ThemeCommand {
             } else {
                 Theme::apply_kind(kind);
             }
+            return;
+        }
+        // An imported slug: preview its palette without persisting the choice.
+        if let Some(imported) = crate::theme::import::load_user_theme(arg) {
+            custom::set_active_preview(imported);
         }
     }
 
     fn cancel_preview(&self, previous: &str) {
+        custom::resume();
         if let Some(kind) = ThemeKind::from_name(previous) {
             Theme::apply_kind(kind);
         }
@@ -68,6 +86,7 @@ impl SlashCommand for ThemeCommand {
         let current = Theme::current_kind();
         let is_auto = theme_cache::is_auto_mode();
         let available = ThemeKind::available();
+        let active_custom = custom::active_slug();
 
         // Prepend "auto" (follow system appearance) as the first option.
         let auto_active = if is_auto { " (active)" } else { "" };
@@ -78,9 +97,10 @@ impl SlashCommand for ThemeCommand {
             description: format!("auto (follow system){auto_active}"),
         }];
 
-        // Concrete themes: only show "(active)" when not in auto mode
+        // Concrete themes: only show "(active)" when not in auto mode. An
+        // imported override also clears the marker, since it is what paints.
         items.extend(available.iter().map(|kind| {
-            let active = if *kind == current && !is_auto {
+            let active = if *kind == current && !is_auto && active_custom.is_none() {
                 " (active)"
             } else {
                 ""
@@ -93,11 +113,55 @@ impl SlashCommand for ThemeCommand {
             }
         }));
 
+        // Imported themes last: they are user content, not part of the catalog.
+        for slug in crate::theme::import::list_imported() {
+            let active = if active_custom.as_deref() == Some(slug.as_str()) {
+                " (active)"
+            } else {
+                ""
+            };
+            items.push(ArgItem {
+                display: slug.clone(),
+                match_text: slug.clone(),
+                insert_text: slug.clone(),
+                description: format!("imported theme{active}"),
+            });
+        }
+
+        // The verbs are offered last so typing a theme name never ranks them.
+        items.push(ArgItem {
+            display: "import".to_string(),
+            match_text: "import file path theme".to_string(),
+            insert_text: "import ".to_string(),
+            description: "Import an opencode or VSCode theme file".to_string(),
+        });
+        items.push(ArgItem {
+            display: "list".to_string(),
+            match_text: "list imported themes".to_string(),
+            insert_text: "list".to_string(),
+            description: "List built-in and imported themes".to_string(),
+        });
+
         Some(items)
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
+
+        // Verbs first: `import` and `list` never collide with a theme name.
+        if let Some(rest) = trimmed.strip_prefix("import") {
+            let path = rest.trim();
+            if path.is_empty() {
+                return CommandResult::Error(
+                    "Usage: /theme import <path-to-theme.json>".to_string(),
+                );
+            }
+            return import_theme(path);
+        }
+        if trimmed == "list" {
+            return CommandResult::Message(list_themes());
+        }
+
         let available = ThemeKind::available();
 
         // No args: toggle between available themes.
@@ -112,6 +176,9 @@ impl SlashCommand for ThemeCommand {
                 return CommandResult::Error("No themes available".into());
             };
 
+            // A built-in kind is explicitly selected, so the imported override
+            // must stop painting over it.
+            custom::clear();
             return CommandResult::Action(Action::SetTheme(next.display_name().to_string()));
         }
 
@@ -120,21 +187,105 @@ impl SlashCommand for ThemeCommand {
         match ThemeKind::from_name(trimmed) {
             Some(kind) => {
                 // An alias normalises to the canonical `display_name`
+                custom::clear();
                 CommandResult::Action(Action::SetTheme(kind.display_name().to_string()))
             }
             None => {
-                let all_names: Vec<&str> = ThemeKind::selectable()
-                    .iter()
-                    .map(|k| k.display_name())
-                    .collect();
-                CommandResult::Error(format!(
-                    "Unknown theme: {}. Available: auto, {}",
-                    trimmed,
-                    all_names.join(", ")
-                ))
+                // Not a built-in: try the imported themes before erroring, so
+                // `/theme <slug>` round-trips what `/theme list` printed.
+                match crate::theme::import::load_user_theme(trimmed) {
+                    Some(imported) => {
+                        let name = imported.name.clone();
+                        custom::set_active(imported);
+                        CommandResult::Message(format!("Theme: {name}"))
+                    }
+                    None => {
+                        let all_names: Vec<&str> = ThemeKind::selectable()
+                            .iter()
+                            .map(|k| k.display_name())
+                            .collect();
+                        let imported = crate::theme::import::list_imported();
+                        let extra = if imported.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; imported: {}", imported.join(", "))
+                        };
+                        CommandResult::Error(format!(
+                            "Unknown theme: {}. Available: auto, {}{extra}",
+                            trimmed,
+                            all_names.join(", ")
+                        ))
+                    }
+                }
             }
         }
     }
+}
+
+/// Convert, save, and activate a theme file.
+fn import_theme(path: &str) -> CommandResult {
+    let expanded = expand_home(path);
+    let source = std::path::Path::new(&expanded);
+    if !source.is_file() {
+        return CommandResult::Error(format!("No such file: {}", source.display()));
+    }
+    let imported = match crate::theme::import::parse_file(source) {
+        Ok(theme) => theme,
+        Err(e) => return CommandResult::Error(format!("Import failed: {e}")),
+    };
+    let saved = match crate::theme::import::save(&imported) {
+        Ok(path) => path,
+        Err(e) => return CommandResult::Error(format!("Saved palette but cannot persist: {e}")),
+    };
+    let name = imported.name.clone();
+    let slug = imported.slug.clone();
+    let dialect = imported.source.label();
+    custom::set_active(imported);
+    CommandResult::Message(format!(
+        "Imported {name} ({dialect}) as `{slug}`\nSaved to {}\nSelect it later with `/theme {slug}`.",
+        saved.display()
+    ))
+}
+
+/// Print every selectable theme, marking the one in effect.
+fn list_themes() -> String {
+    let current = Theme::current_kind();
+    let active_custom = custom::active_slug();
+    let mut lines = Vec::new();
+    lines.push("Built-in:".to_string());
+    for kind in ThemeKind::selectable() {
+        let marker = if active_custom.is_none() && *kind == current {
+            " *"
+        } else {
+            ""
+        };
+        lines.push(format!("  {}{marker}", kind.display_name()));
+    }
+    let imported = crate::theme::import::list_imported();
+    if imported.is_empty() {
+        lines.push("Imported: none. Add one with `/theme import <path>`.".to_string());
+    } else {
+        lines.push("Imported:".to_string());
+        for slug in imported {
+            let marker = if active_custom.as_deref() == Some(slug.as_str()) {
+                " *"
+            } else {
+                ""
+            };
+            lines.push(format!("  {slug}{marker}"));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Expand a leading `~` so `/theme import ~/theme.json` works on every platform.
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~") {
+        if let Some(home) = xai_dirs::home_dir() {
+            return home.join(rest.trim_start_matches(['/', '\\'])).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(test)]
@@ -144,16 +295,39 @@ mod tests {
 
     /// Run a test with a clean in-memory state.
     /// Prevents disk reads by pre-loading the theme state.
+    ///
+    /// Each call gets its own empty theme directory: a shared one would let an
+    /// import test leak a fixture into a suggestion test, and the exact-count
+    /// assertions would then depend on test order.
     fn with_test_env(f: impl FnOnce()) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+
         let _guard = theme_cache::test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         theme_cache::reset_for_test();
         theme_cache::seed_auto_theme_defaults_for_test();
         system_appearance::clear_mock();
+
+        let dir = std::env::temp_dir().join(format!(
+            "openbuild-theme-cmd-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create theme fixture dir");
+        // SAFETY: tests in this module are serialized by `test_lock`.
+        unsafe { std::env::set_var("OPENBUILD_THEME_DIR", &dir) };
+        custom::reset_for_test();
         // Set LOADED=true so current_kind() doesn't try to read from disk.
         theme_cache::set(ThemeKind::GrokNight);
+
         f();
+
+        custom::reset_for_test();
+        unsafe { std::env::remove_var("OPENBUILD_THEME_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
         system_appearance::clear_mock();
         theme_cache::reset_for_test();
     }
@@ -183,8 +357,10 @@ mod tests {
             };
             assert_eq!(first.insert_text, "auto");
             assert!(first.description.contains("follow system"));
-            // The "auto" entry plus every available concrete theme
-            assert_eq!(items.len(), ThemeKind::available().len() + 1);
+            // "auto" + every available concrete theme + the `import`/`list` verbs
+            // (plus any imported theme, which `OPENBUILD_THEME_DIR` pins to none).
+            assert_eq!(items.len(), ThemeKind::available().len() + 1 + 2);
+            assert_eq!(items.last().map(|i| i.insert_text.as_str()), Some("list"));
         });
     }
 
@@ -673,6 +849,196 @@ mod tests {
                 }
                 other => panic!("expected Action::SetTheme(\"tokyonight\"), got {other:?}"),
             }
+        });
+    }
+
+    // -- imported themes ------------------------------------------------------
+
+    /// Minimal VSCode theme, enough to exercise the import path end to end.
+    const VSCODE_THEME: &str = r##"{
+        "name": "Fixture Dark",
+        "colors": {
+            "editor.background": "#1e1e1e",
+            "editor.foreground": "#d4d4d4",
+            "focusBorder": "#007acc"
+        }
+    }"##;
+
+    /// Path to a theme file inside the hermetic test directory.
+    fn fixture(path_name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::var_os("OPENBUILD_THEME_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("with_test_env must set OPENBUILD_THEME_DIR");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        // The importer writes `<slug>.json` next to this one, so pick a name
+        // that cannot collide with a slug.
+        let path = dir.join(path_name);
+        std::fs::write(&path, body).expect("write fixture");
+        path
+    }
+
+    fn run_ctx<'a>(
+        models: &'a crate::acp::model_state::ModelState,
+        bundle: &'a crate::app::bundle::BundleState,
+    ) -> CommandExecCtx<'a> {
+        CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: bundle,
+            screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        }
+    }
+
+    #[test]
+    fn import_reports_the_slug_and_saves_the_theme() {
+        with_test_env(|| {
+            let path = fixture("fixture-source.json", VSCODE_THEME);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+
+            let result = ThemeCommand.run(&mut ctx, &format!("import {}", path.display()));
+            let CommandResult::Message(msg) = result else {
+                panic!("expected a message, got {result:?}");
+            };
+            assert!(msg.contains("Fixture Dark"), "{msg}");
+            assert!(msg.contains("`fixture-dark`"), "{msg}");
+
+            // Importing activates it, and the slug is now addressable.
+            assert_eq!(custom::active_slug().as_deref(), Some("fixture-dark"));
+            assert!(crate::theme::import::list_imported().contains(&"fixture-dark".to_string()));
+        });
+    }
+
+    #[test]
+    fn import_without_a_path_reports_usage() {
+        with_test_env(|| {
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            match ThemeCommand.run(&mut ctx, "import") {
+                CommandResult::Error(msg) => assert!(msg.contains("Usage:"), "{msg}"),
+                other => panic!("expected an error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn import_of_a_missing_file_reports_the_path() {
+        with_test_env(|| {
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            match ThemeCommand.run(&mut ctx, "import no-such-theme-file.json") {
+                CommandResult::Error(msg) => assert!(msg.contains("No such file"), "{msg}"),
+                other => panic!("expected an error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn import_of_an_unrecognised_document_is_an_error() {
+        with_test_env(|| {
+            let path = fixture("not-a-theme.json", r#"{"unrelated": true}"#);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            match ThemeCommand.run(&mut ctx, &format!("import {}", path.display())) {
+                CommandResult::Error(msg) => assert!(msg.contains("unrecognised theme"), "{msg}"),
+                other => panic!("expected an error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn list_marks_the_active_theme_and_counts_both_catalogs() {
+        with_test_env(|| {
+            let path = fixture("list-source.json", VSCODE_THEME);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            let _ = ThemeCommand.run(&mut ctx, &format!("import {}", path.display()));
+
+            let CommandResult::Message(msg) = ThemeCommand.run(&mut ctx, "list") else {
+                panic!("expected a message");
+            };
+            assert!(msg.contains("Built-in:"), "{msg}");
+            assert!(msg.contains("Imported:"), "{msg}");
+            // The imported theme is the one in effect, so it carries the marker.
+            assert!(
+                msg.lines().any(|l| l.contains("fixture-dark") && l.contains('*')),
+                "{msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn selecting_an_imported_slug_activates_it() {
+        with_test_env(|| {
+            let path = fixture("select-source.json", VSCODE_THEME);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            let _ = ThemeCommand.run(&mut ctx, &format!("import {}", path.display()));
+
+            // A built-in selection drops the override...
+            assert!(matches!(
+                ThemeCommand.run(&mut ctx, "grokday"),
+                CommandResult::Action(Action::SetTheme(_))
+            ));
+            assert_eq!(custom::active_slug(), None);
+
+            // ...and the slug restores it.
+            let result = ThemeCommand.run(&mut ctx, "fixture-dark");
+            assert!(matches!(result, CommandResult::Message(_)), "{result:?}");
+            assert_eq!(custom::active_slug().as_deref(), Some("fixture-dark"));
+        });
+    }
+
+    #[test]
+    fn unknown_theme_error_lists_imported_slugs() {
+        with_test_env(|| {
+            let path = fixture("error-source.json", VSCODE_THEME);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            let _ = ThemeCommand.run(&mut ctx, &format!("import {}", path.display()));
+
+            match ThemeCommand.run(&mut ctx, "nope-theme") {
+                CommandResult::Error(msg) => {
+                    assert!(msg.contains("auto"), "{msg}");
+                    assert!(msg.contains("fixture-dark"), "should list imports: {msg}");
+                }
+                other => panic!("expected an error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn preview_of_a_builtin_hides_the_imported_override() {
+        with_test_env(|| {
+            let path = fixture("preview-source.json", VSCODE_THEME);
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = run_ctx(&models, &bundle);
+            let _ = ThemeCommand.run(&mut ctx, &format!("import {}", path.display()));
+            assert_eq!(custom::active_slug().as_deref(), Some("fixture-dark"));
+
+            // Previewing a built-in row must show that row, not the override.
+            ThemeCommand.preview_arg("grokday");
+            assert!(custom::is_suspended());
+            assert_eq!(
+                custom::active_slug(),
+                None,
+                "suspended override must not paint"
+            );
+
+            ThemeCommand.cancel_preview("groknight");
+            assert!(!custom::is_suspended());
+            assert_eq!(custom::active_slug().as_deref(), Some("fixture-dark"));
         });
     }
 }

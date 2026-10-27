@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use agent_client_protocol as acp;
 use anyhow::{Context, Result};
-use openbuild_backend::spawn::SpawnSpec;
 use openbuild_backend::transport::bridge_subprocess;
 use tokio_util::sync::CancellationToken;
 use xai_acp_lib::{AcpClientMessage, acp_send};
@@ -33,8 +32,12 @@ async fn main() -> Result<()> {
     println!("kernel: {}", kernel.display());
     println!("cwd:    {}", cwd.display());
 
-    let mut spec = SpawnSpec::new(kernel);
+    // Go through `default_spec` so this example exercises the same environment
+    // the TUI produces (notably the kernel config directory override).
+    let mut spec = openbuild_backend::spawn::default_spec(Some(kernel.clone()))
+        .context("kernel spec could not be resolved")?;
     spec.cwd = cwd.clone();
+    println!("config: {:?}", spec.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_DIR").map(|(_, v)| v));
     let cancel = CancellationToken::new();
     let bridge = bridge_subprocess(spec, cancel.clone())?;
     let mut rx = bridge.channel.rx;

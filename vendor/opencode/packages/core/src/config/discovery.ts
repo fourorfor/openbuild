@@ -9,7 +9,14 @@ import { Location } from "../location.js"
 import { AbsolutePath } from "../schema.js"
 import type { Options } from "../config.js"
 
-export const names = ["opencode.json", "opencode.jsonc"]
+// OpenBuild reads `openbuild.json(c)` first and still accepts the upstream
+// `opencode.json(c)` names so an existing configuration keeps working.
+// Order matters: `loadFile` keeps the last match, so these are listed
+// lowest-priority-first.
+export const names = ["opencode.json", "opencode.jsonc", "openbuild.json", "openbuild.jsonc"]
+
+/** Names recognised only by this fork, highest priority last. */
+export const preferredNames = ["openbuild.json", "openbuild.jsonc"]
 
 /** Eligible sources in priority order, including paths that may appear later. */
 export interface Sources {

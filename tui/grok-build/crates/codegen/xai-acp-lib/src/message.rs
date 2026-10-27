@@ -473,9 +473,8 @@ mod agent {
                 }
                 Self::SetSessionConfigOption(args) => {
                     state.serialize_field("request", args.request.borrow())?
-                }                Self::SetSessionConfigOption(args) => {
-                    state.serialize_field("request", args.request.borrow())?
-                }            }
+                }
+            }
             state.end()
         }
     }

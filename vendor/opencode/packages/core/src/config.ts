@@ -409,8 +409,11 @@ export const layer = (options?: Options) =>
         function* (patch: Patch) {
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
+          // An existing file wins (highest priority last); otherwise create the
+          // OpenBuild-branded name rather than the upstream one.
           const filepath =
-            (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
+            (yield* Effect.filter(candidates, fs.isFile)).at(-1) ??
+            path.join(directory, ConfigDiscovery.preferredNames[0])
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
           const updated = yield* Effect.try({
             try: () =>
