@@ -2779,7 +2779,10 @@ fn failed_uncensored_switch_clears_the_optimistic_state() {
 #[test]
 fn uncensored_status_reports_mode_and_plugin() {
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .uncensored_mode_active = true;
     let effects = dispatch(Action::ShowUncensoredStatus, &mut app);
     assert!(effects.is_empty());
 
