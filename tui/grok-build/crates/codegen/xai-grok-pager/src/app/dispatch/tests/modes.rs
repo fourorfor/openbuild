@@ -2728,7 +2728,10 @@ fn uncensored_on_switches_to_the_uncensored_agent() {
 #[test]
 fn uncensored_off_returns_to_build() {
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .uncensored_mode_active = true;
     let effects = dispatch(Action::SetUncensoredMode(false), &mut app);
     assert!(
         matches!(
@@ -2745,13 +2748,16 @@ fn uncensored_off_returns_to_build() {
 #[test]
 fn uncensored_toggle_is_idempotent() {
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().uncensored_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .uncensored_mode_active = true;
     let effects = dispatch(Action::SetUncensoredMode(true), &mut app);
-    assert!(effects.is_empty(), "expected no ACP round-trip, got: {effects:?}");
-    assert_eq!(
-        test_agent(&app, AgentId(0)).uncensored_mode_pending,
-        None
+    assert!(
+        effects.is_empty(),
+        "expected no ACP round-trip, got: {effects:?}"
     );
+    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, None);
 }
 
 #[test]
@@ -2789,6 +2795,8 @@ fn uncensored_status_reports_mode_and_plugin() {
     let text = last_system_text(&app, AgentId(0));
     assert!(text.contains("Uncensored mode: on"), "{text}");
     assert!(text.contains("Plugin:"), "{text}");
+    assert!(text.contains("Config:"), "{text}");
+    assert!(text.contains("refusal_retry="), "{text}");
     assert!(text.contains("Permissions are unchanged"), "{text}");
     assert!(text.contains("may still refuse"), "{text}");
 }

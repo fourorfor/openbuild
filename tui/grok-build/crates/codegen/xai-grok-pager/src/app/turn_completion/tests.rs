@@ -1611,3 +1611,59 @@ fn refusal_is_no_longer_reported_as_completed() {
     });
     assert!(matches!(marker, Some(SessionEvent::TurnRefused { .. })));
 }
+
+#[test]
+fn driver_stop_reason_surfaces_provider_refusal() {
+    assert_eq!(
+        driver_stop_reason(Some(acp::StopReason::Refusal), false),
+        TurnStopReason::Refusal
+    );
+    assert_eq!(
+        driver_stop_reason(Some(acp::StopReason::MaxTokens), false),
+        TurnStopReason::MaxTokens
+    );
+    assert_eq!(
+        driver_stop_reason(Some(acp::StopReason::MaxTurnRequests), false),
+        TurnStopReason::MaxTurnRequests
+    );
+    assert_eq!(
+        driver_stop_reason(Some(acp::StopReason::EndTurn), false),
+        TurnStopReason::EndTurn
+    );
+    assert_eq!(
+        driver_stop_reason(Some(acp::StopReason::Refusal), true),
+        TurnStopReason::Cancelled
+    );
+    assert_eq!(driver_stop_reason(None, false), TurnStopReason::EndTurn);
+}
+
+#[test]
+fn refusal_retry_is_opt_in_and_single_shot() {
+    use openbuild_backend::plugin::{RefusalRetry, UncensoredConfig};
+
+    let once = UncensoredConfig {
+        refusal_retry: RefusalRetry::Once,
+        ..Default::default()
+    };
+    assert!(should_retry_refusal(&once, true, false, true, false));
+    assert!(
+        !should_retry_refusal(&once, true, true, true, false),
+        "the retry turn itself must not retry again"
+    );
+    assert!(!should_retry_refusal(&once, false, false, true, false));
+    assert!(!should_retry_refusal(&once, true, false, false, false));
+    assert!(!should_retry_refusal(&once, true, false, true, true));
+    assert!(!should_retry_refusal(
+        &UncensoredConfig::default(),
+        true,
+        false,
+        true,
+        false
+    ));
+    let broken = UncensoredConfig {
+        refusal_retry: RefusalRetry::Once,
+        error: Some("bad config".into()),
+        ..Default::default()
+    };
+    assert!(!should_retry_refusal(&broken, true, false, true, false));
+}

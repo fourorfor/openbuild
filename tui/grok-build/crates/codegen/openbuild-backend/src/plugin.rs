@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "1";
+pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "2";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -264,6 +265,208 @@ fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// How `/uncensored` reacts to a provider-level refusal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RefusalRetry {
+    /// Only show the visible refusal marker.
+    #[default]
+    Off,
+    /// Resend one continuation prompt; a second refusal is not retried.
+    Once,
+}
+
+impl RefusalRetry {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Once => "once",
+        }
+    }
+}
+
+/// Parsed optional configuration for the managed uncensored plugin.
+///
+/// The plugin itself reads the same file (`<config>/uncensored.json`). This
+/// mirror exists so `/uncensored status` can report the effective values and,
+/// more importantly, a real parse error instead of silently falling back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncensoredConfig {
+    pub path: Option<PathBuf>,
+    pub model: Option<String>,
+    pub inherit_subagents: bool,
+    pub refusal_retry: RefusalRetry,
+    pub error: Option<String>,
+}
+
+impl Default for UncensoredConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            model: None,
+            inherit_subagents: false,
+            refusal_retry: RefusalRetry::Off,
+            error: None,
+        }
+    }
+}
+
+impl UncensoredConfig {
+    /// One-line summary for `/uncensored status`.
+    pub fn summary(&self) -> String {
+        let values = format!(
+            "model={} inheritSubagents={} refusal_retry={}",
+            self.model.as_deref().unwrap_or("<current>"),
+            self.inherit_subagents,
+            self.refusal_retry.as_str()
+        );
+        match &self.error {
+            Some(error) => format!("ERROR: {error} (defaults: {values})"),
+            None => values,
+        }
+    }
+}
+
+pub fn uncensored_config_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(UNCENSORED_CONFIG_FILE)
+}
+
+/// Inspect `<effective config>/uncensored.json`.
+pub fn uncensored_config() -> UncensoredConfig {
+    uncensored_config_in(effective_config_dir().as_deref())
+}
+
+/// Inspect the config file under an explicit config directory.
+pub fn uncensored_config_in(config_dir: Option<&Path>) -> UncensoredConfig {
+    let Some(config_dir) = config_dir else {
+        return UncensoredConfig::default();
+    };
+    let path = uncensored_config_path(config_dir);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return UncensoredConfig {
+                path: Some(path),
+                ..Default::default()
+            };
+        }
+        Err(error) => {
+            return UncensoredConfig {
+                path: Some(path),
+                error: Some(format!("cannot read config: {error}")),
+                ..Default::default()
+            };
+        }
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => match parse_uncensored_config(&value) {
+            Ok((model, inherit_subagents, refusal_retry)) => UncensoredConfig {
+                path: Some(path),
+                model,
+                inherit_subagents,
+                refusal_retry,
+                error: None,
+            },
+            Err(error) => UncensoredConfig {
+                path: Some(path),
+                error: Some(error),
+                ..Default::default()
+            },
+        },
+        Err(error) => UncensoredConfig {
+            path: Some(path),
+            error: Some(format!("invalid JSON: {error}")),
+            ..Default::default()
+        },
+    }
+}
+
+const CONFIG_KEYS: &[&str] = &[
+    "model",
+    "inheritSubagents",
+    "inherit_subagents",
+    "refusalRetry",
+    "refusal_retry",
+];
+
+fn parse_uncensored_config(
+    value: &serde_json::Value,
+) -> Result<(Option<String>, bool, RefusalRetry), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "config must be a JSON object".to_string())?;
+    let unknown: Vec<&str> = object
+        .keys()
+        .filter(|key| !CONFIG_KEYS.contains(&key.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!("unknown option(s): {}", unknown.join(", ")));
+    }
+
+    let model = match object.get("model") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            if !valid_model_ref(text) {
+                return Err(format!("model must be \"provider/model\", got {text:?}"));
+            }
+            Some(text.to_string())
+        }
+        Some(_) => return Err("model must be a non-empty string".to_string()),
+    };
+
+    let inherit_subagents = match alias_value(object, "inheritSubagents", "inherit_subagents")? {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("inheritSubagents must be true or false".to_string()),
+    };
+
+    let refusal_retry = match alias_value(object, "refusalRetry", "refusal_retry")? {
+        None => RefusalRetry::Off,
+        Some(serde_json::Value::String(text)) if text == "off" => RefusalRetry::Off,
+        Some(serde_json::Value::String(text)) if text == "once" => RefusalRetry::Once,
+        Some(serde_json::Value::String(text)) => {
+            return Err(format!(
+                "refusal_retry must be \"off\" or \"once\", got {text:?}"
+            ));
+        }
+        Some(_) => return Err("refusal_retry must be a string".to_string()),
+    };
+
+    Ok((model, inherit_subagents, refusal_retry))
+}
+
+fn alias_value<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<&'a serde_json::Value>, String> {
+    match (object.get(primary), object.get(alias)) {
+        (Some(a), Some(b)) if a != b => Err(format!("{primary} and {alias} disagree")),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn valid_model_ref(value: &str) -> bool {
+    let Some((provider, rest)) = value.split_once('/') else {
+        return false;
+    };
+    if provider.trim() != provider
+        || provider.is_empty()
+        || provider.contains('#')
+        || rest.is_empty()
+    {
+        return false;
+    }
+    match rest.split_once('#') {
+        None => true,
+        Some((id, variant)) => {
+            !id.is_empty() && id.trim() == id && !variant.is_empty() && !variant.contains('#')
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +612,106 @@ mod tests {
         let status = uncensored_status_in(None);
         assert_eq!(status.state, PluginState::NoConfigDir);
         assert!(!status.present());
+    }
+
+    #[test]
+    fn uncensored_config_defaults_when_missing() {
+        let config = fixture("config-missing");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.path, Some(uncensored_config_path(&config)));
+        assert_eq!(parsed.model, None);
+        assert!(!parsed.inherit_subagents);
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
+        assert_eq!(parsed.error, None);
+        assert!(parsed.summary().contains("refusal_retry=off"));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn uncensored_config_parses_both_spellings() {
+        let config = fixture("config-valid");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"model":"local/qwen3-32b","inheritSubagents":true,"refusal_retry":"once"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        assert!(parsed.inherit_subagents);
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
+
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"model":"local/qwen3-32b#think","inherit_subagents":true,"refusalRetry":"off"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(parsed.inherit_subagents);
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn uncensored_config_reports_invalid_json_instead_of_falling_back_silently() {
+        let config = fixture("config-bad-json");
+        fs::write(uncensored_config_path(&config), "{not json").expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("invalid JSON"),
+            "{:?}",
+            parsed.error
+        );
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
+        assert!(parsed.summary().starts_with("ERROR:"));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn uncensored_config_rejects_unknown_and_invalid_values() {
+        let config = fixture("config-invalid");
+        for (body, needle) in [
+            (r#"{"model":"no-slash"}"#, "provider/model"),
+            (r#"{"inheritSubagents":"yes"}"#, "true or false"),
+            (r#"{"refusal_retry":"always"}"#, "off"),
+            (r#"{"unknownKey":1}"#, "unknown option"),
+        ] {
+            fs::write(uncensored_config_path(&config), body).expect("write config");
+            let parsed = uncensored_config_in(Some(&config));
+            assert!(
+                parsed
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(needle)),
+                "{body} -> {:?}",
+                parsed.error
+            );
+        }
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn uncensored_config_rejects_conflicting_aliases() {
+        let config = fixture("config-alias");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"inheritSubagents":true,"inherit_subagents":false}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("disagree")),
+            "{:?}",
+            parsed.error
+        );
+        let _ = fs::remove_dir_all(config);
     }
 }

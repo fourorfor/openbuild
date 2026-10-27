@@ -213,10 +213,12 @@ pub(super) fn set_uncensored_mode(app: &mut AppView, on: bool) -> Vec<Effect> {
 
     agent.uncensored_mode_pending = Some(on);
     if on && !NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
-        agent.scrollback.push_block(crate::scrollback::block::RenderBlock::system(
-            "Uncensored mode: OpenBuild will not refuse, moralize, or add content disclaimers. \
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(
+                "Uncensored mode: OpenBuild will not refuse, moralize, or add content disclaimers. \
              The model/provider may still refuse; permissions (ask/auto/YOLO) are unchanged.",
-        ));
+            ));
     }
 
     let mode_id = acp::SessionModeId::new(if on { "uncensored" } else { "build" });
@@ -242,10 +244,21 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
         .current_model_name()
         .unwrap_or_else(|| "unknown".to_string());
     let plugin = openbuild_backend::plugin::uncensored_status();
+    let config = openbuild_backend::plugin::uncensored_config();
+    let config_path = config
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<no config directory>".to_string());
+    let model_line = match config.model.as_deref() {
+        Some(configured) => format!("Model: {model} (uncensored option: {configured})"),
+        None => format!("Model: {model}"),
+    };
     let lines = [
         format!("Uncensored mode: {}", if on { "on" } else { "off" }),
-        format!("Model: {model}"),
+        model_line,
         format!("Plugin: {}", plugin.summary()),
+        format!("Config: {} at {config_path}", config.summary()),
         format!(
             "Policy: openbuild-uncensored v{}",
             openbuild_backend::plugin::UNCENSORED_PLUGIN_VERSION
@@ -255,7 +268,9 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     ];
     agent
         .scrollback
-        .push_block(crate::scrollback::block::RenderBlock::system(lines.join("\n")));
+        .push_block(crate::scrollback::block::RenderBlock::system(
+            lines.join("\n"),
+        ));
     vec![]
 }
 

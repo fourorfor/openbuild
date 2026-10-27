@@ -1283,6 +1283,9 @@ pub struct AgentView {
     pub(crate) uncensored_mode_active: bool,
     /// Optimistic `/uncensored` switch, cleared by the next config-option update.
     pub(crate) uncensored_mode_pending: Option<bool>,
+    /// Prompt id of the single automatic retry sent after a provider refusal.
+    /// Cleared when that retry turn ends, so a second refusal cannot loop.
+    pub(crate) uncensored_retry_pending: bool,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.

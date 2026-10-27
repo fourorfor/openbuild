@@ -8,6 +8,7 @@
 
 use crate::app::error_display::WireErrorType;
 use crate::scrollback::blocks::SessionEvent;
+use agent_client_protocol as acp;
 
 use super::agent::AgentId;
 use super::agent_view::AgentView;
@@ -117,6 +118,42 @@ pub(crate) fn terminal_marker(input: TerminalMarkerInput<'_>) -> Option<SessionE
             elapsed,
         }),
     }
+}
+
+/// The driver learns its stop reason from the `PromptResponse` RPC rather
+/// than from a terminal broadcast. Keep that mapping in one testable place so
+/// a provider refusal cannot silently render as "Turn completed".
+pub(crate) fn driver_stop_reason(
+    stop_reason: Option<acp::StopReason>,
+    was_cancelling: bool,
+) -> TurnStopReason {
+    if was_cancelling {
+        return TurnStopReason::Cancelled;
+    }
+    match stop_reason {
+        Some(acp::StopReason::Refusal) => TurnStopReason::Refusal,
+        Some(acp::StopReason::MaxTokens) => TurnStopReason::MaxTokens,
+        Some(acp::StopReason::MaxTurnRequests) => TurnStopReason::MaxTurnRequests,
+        _ => TurnStopReason::EndTurn,
+    }
+}
+
+/// Whether this refusal should get the single automatic continuation retry.
+/// `retry_turn` is true while the retry itself is running, which is what keeps
+/// a second refusal from looping.
+pub(crate) fn should_retry_refusal(
+    config: &openbuild_backend::plugin::UncensoredConfig,
+    refusal: bool,
+    retry_turn: bool,
+    mode_on: bool,
+    pending_adoption: bool,
+) -> bool {
+    refusal
+        && !retry_turn
+        && mode_on
+        && !pending_adoption
+        && config.error.is_none()
+        && config.refusal_retry == openbuild_backend::plugin::RefusalRetry::Once
 }
 
 /// The turn-failed terminal marker: formats `agent_result` with the typed kind.
