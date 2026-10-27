@@ -95,6 +95,17 @@ $env:OPENBUILD_KERNEL  = "<repo>\dist\openbuild-kernel.exe"
 
 > 本工作区附带的 `dist\openbuild.exe` 是调试构建（已用 `editbin /STACK:33554432` 扩大主线程栈）；`build.ps1` 默认生成 release 构建。
 
+### 安装到本机（可选）
+
+```powershell
+.\install.ps1              # 构建 + 安装
+.\install.ps1 -SkipBuild   # 直接安装 dist\ 里现有的产物
+```
+
+安装到 `%LOCALAPPDATA%\OpenBuild`，并把该目录加入用户 PATH，之后任意终端里
+直接敲 `openbuild` 即可。内核与 TUI 放在同一目录，TUI 会自己找到它，
+不再需要设置 `OPENBUILD_KERNEL`。
+
 ### 只验证内核
 
 ```powershell
