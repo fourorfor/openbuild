@@ -162,6 +162,47 @@
     }
 
     /// Full-replay reconnect: the pre-outage transcript stays stashed during the window and the replayed transcript replaces it wholesale on success.
+    /// A restarted kernel is a new process whose `eventId` counter starts over,
+    /// so the live-traffic highwater must not survive the reconnect: keeping it
+    /// would dedup-drop every update of the restored session and the transcript
+    /// would stay frozen while turns silently completed.
+    #[test]
+    fn reconnect_clears_live_event_highwaters() {
+        let mut app = make_app_with_agent("sess-rc3");
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.last_applied_event_seq = Some(9_000);
+            agent.last_applied_xai_event_seq = Some(9_000);
+            agent.last_seen_event_id = Some("sess-rc3-9000".into());
+            agent.last_seen_event_seq = Some(9_000);
+        }
+
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .reset_event_highwaters_for_new_kernel();
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.last_applied_event_seq, None);
+        assert_eq!(agent.last_applied_xai_event_seq, None);
+        assert_eq!(
+            agent.last_seen_event_id.as_deref(),
+            Some("sess-rc3-9000"),
+            "the reconnect cursor bounds session/load replay and must survive"
+        );
+
+        // The replacement process mints ids from a fresh counter; a live update
+        // below the dead process's highwater must still render.
+        assert!(
+            handle(
+                make_agent_chunk_with_event("sess-rc3", "after restart", "p1", Some("sess-rc3-2")),
+                &mut app,
+            ),
+            "a live update from the restarted kernel must render"
+        );
+    }
+
     #[test]
     fn reconnect_reload_full_replay_replaces_transcript_on_success() {
         let mut app = make_app_with_agent("sess-rc");

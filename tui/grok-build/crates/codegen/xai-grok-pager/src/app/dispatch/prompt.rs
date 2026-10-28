@@ -30,6 +30,31 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// Shared by every submit guard that refuses while the session reconnects.
 pub(super) const RECONNECTING_NOTICE: &str = "Reconnecting, please wait...";
 
+/// Slash commands that must still run while the ACP channel is unusable.
+///
+/// These are the escape hatches from a dead kernel: they either replace the
+/// connection (`/reconnect`, `/backend`) or end the process. Everything else
+/// needs the kernel, so the `reconnect_pending` guard still refuses it.
+pub(super) const DISCONNECTED_COMMANDS: &[&str] = &["reconnect", "backend"];
+
+/// Whether this submission is a recovery command that bypasses the
+/// `reconnect_pending` submit guard.
+///
+/// Only a literal `/`-prefixed line counts: chip text is never a command, and
+/// a bare word must not become an escape hatch.
+pub(super) fn runs_while_disconnected(text: &str, literal: bool) -> bool {
+    if literal {
+        return false;
+    }
+    let trimmed = text.trim();
+    let Some(invocation) = crate::slash::parse_invocation(trimmed) else {
+        return false;
+    };
+    DISCONNECTED_COMMANDS
+        .iter()
+        .any(|name| invocation.token.eq_ignore_ascii_case(name))
+}
+
 pub(super) use crate::app::agent_view::{
     BUILD_IN_FLIGHT_ABANDON_NOTICE, BUILD_IN_FLIGHT_REVISE_NOTICE, LEAVE_PLAN_REVISE_NOTICE,
 };
@@ -653,7 +678,10 @@ pub(super) fn dispatch_send_prompt_submission(
     // A submit with no intervening key (mouse send, `SubmitFollowUp`, `RevisePlan`, `SendSlashCommandPreservingDraft`) would otherwise leave a stale pending action
     app.pending_action = None;
 
-    if app.reconnect_pending {
+    // `reconnect_pending` means the ACP channel cannot carry a prompt. Recovery
+    // commands are the exception: `/reconnect` is how the user gets out of that
+    // state, so gating it on the same flag would lock the session forever.
+    if app.reconnect_pending && !runs_while_disconnected(&text, literal) {
         app.show_toast(RECONNECTING_NOTICE);
         return vec![];
     }

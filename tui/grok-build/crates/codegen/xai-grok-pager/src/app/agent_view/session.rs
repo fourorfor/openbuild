@@ -75,6 +75,21 @@ impl AgentView {
             self.last_seen_event_seq = new_seq.or(cur_seq);
         }
     }
+    /// Clear the live-traffic dedup highwaters after `/reconnect` adopted a new
+    /// kernel process.
+    ///
+    /// A restarted kernel mints `eventId` from a fresh process-wide counter, so
+    /// its live ids start below whatever the dead process had reached. The
+    /// highwaters exist to drop duplicate live updates; keeping a dead
+    /// process's value would instead drop every update of the restored session,
+    /// which reads as a transcript that never receives a reply.
+    ///
+    /// The reconnect cursor (`last_seen_event_id`) is deliberately NOT reset:
+    /// `session/load` uses it to bound the replay.
+    pub(crate) fn reset_event_highwaters_for_new_kernel(&mut self) {
+        self.last_applied_event_seq = None;
+        self.last_applied_xai_event_seq = None;
+    }
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {

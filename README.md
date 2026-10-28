@@ -340,10 +340,11 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
   还没有 diff 视图，完整 usage 也还没有用量面板。
 - **ACP 服务端**是单客户端 stdio 中继；relay 示例已覆盖 initialize / session/new / prompt，
   但 Zed/Neovim 客户端接入尚未实测。
-- **交互式 TUI 的 PTY 级验收**尚未执行。上游的 `xai-grok-pager-pty-harness`
-  在 Windows 上本来就跑不起来（上游自带的 `welcome_screen` 用例同样零输出），
-  所以「杀内核 → 提示 → 重连」的传输层由 `openbuild-backend --example crash` 覆盖，
-  TUI 层需人工确认一次。
+- **交互式 TUI 的 PTY 级验收**：J1（杀内核 → 提示 → `/reconnect` → 恢复）
+  已用仓库自带的 `ptyctl` 在真实 release 二进制上通过；上游
+  `xai-grok-pager-pty-harness` 在 Windows 上仍不可用（零字节屏幕），但不再是
+  验收阻塞项。证据：`.yanagent/evidence/openbuild/manual-j1-20261028.md`。
+  B1/B3/C1/D2/E2 等其余人工项仍待补。
 - **Windows 上的上游测试失败**：`cargo test -p xai-grok-pager --lib` 有 104 个用例失败，
   全部与本次改动无关，按根因分为：
   - `InputOutcome::Changed` 断言（15）：依赖 Unix 终端按键解码。

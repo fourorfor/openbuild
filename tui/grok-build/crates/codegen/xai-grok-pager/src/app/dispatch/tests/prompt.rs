@@ -6720,3 +6720,56 @@ fn send_now_from_dashboard_view_still_flushes_image_notice() {
     );
     assert!(toast_text(&app, AgentId(0)).is_none());
 }
+
+/// After a kernel crash every submit is refused ("Reconnecting, please wait...")
+/// except the command that repairs the dead channel. Without the exception the
+/// user is locked out of the only escape hatch.
+#[test]
+fn reconnect_command_bypasses_the_reconnect_pending_guard() {
+    let mut app = test_app_with_agent();
+    app.reconnect_pending = true;
+
+    let effects = dispatch(Action::SendPrompt("/reconnect".into()), &mut app);
+
+    assert!(
+        toast_text(&app, AgentId(0)).is_none(),
+        "the recovery command must not be refused with the reconnecting toast"
+    );
+    assert!(
+        effects.is_empty(),
+        "dispatch only queues the restart request; the loop owns the channel swap, got {effects:?}"
+    );
+}
+
+/// The guard must stay for ordinary prompts: a dead channel would swallow them
+/// and the transcript would show a message that never went anywhere.
+#[test]
+fn plain_prompt_is_still_refused_while_reconnecting() {
+    let mut app = test_app_with_agent();
+    app.reconnect_pending = true;
+
+    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+
+    assert!(effects.is_empty(), "got {effects:?}");
+    assert_eq!(
+        toast_text(&app, AgentId(0)),
+        Some("Reconnecting, please wait...")
+    );
+}
+
+/// Only a real `/`-prefixed line counts as a command: chip or model text must
+/// never be able to reach the escape hatch.
+#[test]
+fn recovery_commands_are_matched_as_slash_lines_only() {
+    use super::super::prompt::runs_while_disconnected;
+    for text in ["/reconnect", "  /reconnect  ", "/backend", "/Reconnect"] {
+        assert!(runs_while_disconnected(text, false), "{text:?}");
+    }
+    for text in ["reconnect", "/reconnecting", "/kernel restart", ""] {
+        assert!(!runs_while_disconnected(text, false), "{text:?}");
+    }
+    assert!(
+        !runs_while_disconnected("/reconnect", true),
+        "literal submissions are model text, never commands"
+    );
+}

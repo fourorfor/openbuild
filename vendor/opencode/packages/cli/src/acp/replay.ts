@@ -10,8 +10,8 @@ import { partsToContentChunks } from "./content"
 import { ACPPermission } from "./permission"
 import type { Attached } from "./sessions"
 import { ACPTranslate } from "./translate"
+import { nextEventId } from "./event-id"
 import { completedToolUpdate, errorToolUpdate, pendingToolCall, runningToolUpdate } from "./tool"
-
 export function history(
   client: OpenCodeClient,
   connection: ACPConnection.Interface,
@@ -22,12 +22,13 @@ export function history(
   // Grok reads `_meta` on the notification (not on the update), and uses
   // `isReplay` to suppress user-echo duplication; opencode's ACP layer does not
   // add it, so stamp it here (the replay analogue of P1).
-  let seq = 0
   const stamp = (update: SessionUpdate): { update: SessionUpdate; meta: Record<string, unknown> } => ({
     update,
     meta: {
       isReplay: true,
-      eventId: `${attached.id}-${++seq}`,
+      // Same process-wide counter the live turns use, so a client that tracks
+      // `eventId` never sees the replayed tail out of order with live updates.
+      eventId: nextEventId(attached.id),
     },
   })
   return Stream.paginate(undefined, (cursor: string | undefined) =>

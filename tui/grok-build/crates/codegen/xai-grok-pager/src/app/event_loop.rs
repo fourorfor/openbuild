@@ -334,6 +334,13 @@ fn plan_reconnect_load(
 /// Number of kernel stderr lines shown in the crash notice.
 const KERNEL_CRASH_STDERR_LINES: usize = 8;
 
+/// Upper bound on messages applied while draining a restart's queued replay.
+///
+/// `session/load` replays the whole transcript as ordinary notifications, so a
+/// long session can queue thousands of them. The cap only exists so a wedged
+/// producer cannot pin the loop forever; the replay itself is legitimate.
+const RECONNECT_REPLAY_DRAIN_MAX: usize = 50_000;
+
 /// The transcript block that explains a dead kernel.
 ///
 /// Built as one string so the whole diagnosis lands as a single system entry:
@@ -363,6 +370,10 @@ fn kernel_crash_notice(exit: openbuild_backend::BridgeExit) -> String {
 /// Called once per death (the cancel token only fires once per connection), so
 /// it never stacks duplicate notices.
 fn mark_kernel_lost(app: &mut AppView, exit: openbuild_backend::BridgeExit) {
+    // Publish the reason before the UI gates itself: `/reconnect` reads
+    // `health::is_dead()`, and the bridge thread may not have stamped it yet
+    // when the ACP channel closed first.
+    openbuild_backend::health::record(exit);
     crate::unified_log::error(
         "kernel.exited",
         None,
@@ -407,6 +418,32 @@ fn mark_kernel_lost(app: &mut AppView, exit: openbuild_backend::BridgeExit) {
             message: notice,
             action: None,
         });
+    }
+}
+
+/// Whether a closed ACP receive channel means "the kernel died" rather than
+/// "the app is quitting".
+///
+/// The two look identical at the channel level: both drop the agent-side
+/// sender. They are not the same event for the user, though — a dead kernel is
+/// recoverable and must be explained, while a shutdown must exit quietly.
+///
+/// A quit never reaches this predicate: `/quit`, Ctrl+Q and the signal handler
+/// all break the loop before the select can observe the closed channel. So on
+/// the OpenBuild backend a close is a crash — including the case where the
+/// bridge thread died before it could record a status (`None`), which must be
+/// reported rather than swallowed.
+fn kernel_exit_on_channel_close(
+    is_opencode: bool,
+    exit: Option<openbuild_backend::BridgeExit>,
+) -> Option<openbuild_backend::BridgeExit> {
+    if !is_opencode {
+        return None;
+    }
+    match exit {
+        Some(openbuild_backend::BridgeExit::UserCancel) => None,
+        Some(exit) => Some(exit),
+        None => Some(openbuild_backend::BridgeExit::KernelExited { code: None }),
     }
 }
 
@@ -1935,6 +1972,12 @@ pub(crate) async fn run(
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let mut session_load_barrier = SessionLoadBarrier::new();
     let mut acp_peek: Option<AcpClientMessage> = None;
+    // A dead kernel closes both the cancel token and the receive half of the
+    // ACP channel. Two independent arms can therefore notice the same death;
+    // these two flags make the notice idempotent and stop the closed reader
+    // from being polled in a hot loop.
+    let mut acp_channel_closed = false;
+    let mut kernel_lost_notified = false;
     let (progress_tx, mut progress_rx) =
         tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
     let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::TaggedVoiceEvent>>;
@@ -2446,21 +2489,27 @@ pub(crate) async fn run(
                     continue;
                 }
                 let exit = openbuild_backend::health::exit();
-                match exit {
-                    Some(exit @ openbuild_backend::BridgeExit::KernelExited { .. })
-                        if openbuild_backend::profile::is_opencode() =>
-                    {
-                        mark_kernel_lost(&mut app, exit);
+                match kernel_exit_on_channel_close(
+                    openbuild_backend::profile::is_opencode(),
+                    exit,
+                ) {
+                    Some(exit) => {
+                        // The receiver may have reported the same death first.
+                        // One notice per death keeps the transcript readable.
+                        if !kernel_lost_notified {
+                            mark_kernel_lost(&mut app, exit);
+                            kernel_lost_notified = true;
+                            presenter.request(false);
+                        }
                         // The token is already cancelled, so leaving it in place
                         // would make this arm fire on every pass and spin the
                         // loop. Swap in a fresh one; a successful restart
                         // installs the new connection's own token.
                         connection_cancel = tokio_util::sync::CancellationToken::new();
-                        presenter.request(false);
                         continue;
                     }
-                    // An explicit stop (shutdown) or a non-kernel backend: the
-                    // original behaviour, exit the loop.
+                    // A non-kernel backend, or a stop this process asked for
+                    // (shutdown, restart): the original behaviour, exit the loop.
                     _ => break,
                 }
             }
@@ -2606,8 +2655,37 @@ pub(crate) async fn run(
                     Some(msg) => Some(msg),
                     None => acp_rx.recv().await,
                 }
-            }, if input_rx.is_empty() => {
-                let Some(msg) = msg else { break };
+            }, if input_rx.is_empty() && !acp_channel_closed => {
+                let Some(msg) = msg else {
+                    // The agent side dropped its sender. When the kernel process
+                    // died that is a recoverable crash, not a quit: explain it
+                    // and keep the loop alive so `/reconnect` can run. `break`
+                    // here would tear the TUI down before the notice rendered,
+                    // which is exactly the J1 failure.
+                    match kernel_exit_on_channel_close(
+                        openbuild_backend::profile::is_opencode(),
+                        openbuild_backend::health::exit(),
+                    ) {
+                        Some(exit) => {
+                            // The cancel-token arm may have reported this same
+                            // death first; one notice per death keeps the
+                            // transcript readable.
+                            if !kernel_lost_notified {
+                                mark_kernel_lost(&mut app, exit);
+                                kernel_lost_notified = true;
+                            }
+                            // `recv()` returns `None` forever on a closed
+                            // channel. Disarm the arm instead of busy-looping;
+                            // a successful restart installs a fresh receiver and
+                            // re-arms it.
+                            acp_channel_closed = true;
+                            presenter.request(false);
+                            continue;
+                        }
+                        // A deliberate shutdown: keep the original behaviour.
+                        None => break,
+                    }
+                };
                 let mut state_changed = false;
                 for msg in normalizer.normalize(msg) {
                     state_changed |= acp_handler::handle(msg, &mut app);
@@ -3313,6 +3391,19 @@ pub(crate) async fn run(
                 // Swap the connection channels. The old bridge thread already
                 // exited (its child is gone), so nothing is left to drain.
                 acp_rx = conn.rx;
+                // A live receiver replaces the closed one, and the next death is
+                // a new event that deserves its own notice.
+                acp_channel_closed = false;
+                kernel_lost_notified = false;
+                // The replacement kernel is a new process, so its `eventId`
+                // counter restarts near zero while the highwater still holds the
+                // dead process's tail. Keeping it would dedup-drop every live
+                // update of the restored session — the transcript would stay
+                // frozen while turns silently completed. These highwaters only
+                // dedup live traffic; the replay bound is the reconnect cursor.
+                for agent in app.agents.values_mut() {
+                    agent.reset_event_highwaters_for_new_kernel();
+                }
                 // The old feed points at the dead kernel's server. Drop it and
                 // adopt the new connection's feed, if the new kernel advertised
                 // one.
@@ -3334,6 +3425,32 @@ pub(crate) async fn run(
                 openbuild_backend::profile::set_active(profile);
                 app.auth_methods = conn.auth_methods.clone();
                 app.models = conn.models;
+
+                // `session/load` replays the transcript as ordinary
+                // notifications, and the restart task has already sent them:
+                // they are queued in this fresh receiver right now.
+                //
+                // Finalizing the reload windows before applying them would take
+                // the `success && !saw_replay` branch — restore the pre-outage
+                // stash — and then the replay would land on top of it, showing
+                // every message twice. Applying the queued replay first makes
+                // the windows resolve as `saw_replay`, so the rebuilt live
+                // transcript replaces the stash instead of stacking on it.
+                let mut replayed = 0usize;
+                while replayed < RECONNECT_REPLAY_DRAIN_MAX {
+                    let Ok(msg) = acp_rx.try_recv() else { break };
+                    replayed += 1;
+                    for msg in normalizer.normalize(msg) {
+                        acp_handler::handle(msg, &mut app);
+                    }
+                }
+                // Anything the replay queued (notices, scrollback) has to be
+                // processed before the outcome is decided.
+                if !app.pending_effects.is_empty() {
+                    let effs = std::mem::take(&mut app.pending_effects);
+                    let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
+                }
+                tracing::info!(replayed, "kernel reconnect: applied queued session replay");
 
                 let mut loads: std::collections::HashMap<_, _> = outcome
                     .loads
@@ -5242,6 +5359,35 @@ mod tests {
             "OpenBuild kernel connection closed"
         );
         assert!(!openbuild_backend::BridgeExit::UserCancel.is_kernel_exit());
+    }
+    /// A closed ACP channel is the *first* thing a killed kernel produces, and
+    /// it used to break the event loop before the crash notice could render —
+    /// the J1 failure. These cases pin the classification that now decides
+    /// between "explain and stay" and "quit quietly".
+    #[test]
+    fn closed_channel_is_a_crash_only_on_the_kernel_backend() {
+        use openbuild_backend::BridgeExit;
+        // A kill the bridge already classified keeps its exit code.
+        assert_eq!(
+            kernel_exit_on_channel_close(true, Some(BridgeExit::KernelExited { code: Some(1) })),
+            Some(BridgeExit::KernelExited { code: Some(1) })
+        );
+        // The channel can close before the bridge stamps a status; that is
+        // still a death, and reporting "no code" beats exiting silently.
+        assert_eq!(
+            kernel_exit_on_channel_close(true, None),
+            Some(BridgeExit::KernelExited { code: None })
+        );
+        // A stop this process asked for is not a crash.
+        assert_eq!(
+            kernel_exit_on_channel_close(true, Some(BridgeExit::UserCancel)),
+            None
+        );
+        // The in-process shell has no kernel child to explain.
+        assert_eq!(
+            kernel_exit_on_channel_close(false, Some(BridgeExit::KernelExited { code: Some(2) })),
+            None
+        );
     }
     /// The guard that decides whether `/reconnect` can run at all.
     ///

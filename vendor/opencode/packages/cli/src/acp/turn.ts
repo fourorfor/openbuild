@@ -24,11 +24,11 @@ import { currentModel } from "./config-option"
 import type { ACPConnection } from "./connection"
 import { ACPElicitation } from "./elicitation"
 import { ACPError } from "./error"
+import { nextEventId } from "./event-id"
 import { ACPPermission } from "./permission"
 import { ACPPrompt } from "./prompt"
 import type { ACPSessions, Attached } from "./sessions"
 import { ACPTranslate } from "./translate"
-
 export interface Interface {
   readonly prompt: (input: PromptRequest, signal: AbortSignal) => Effect.Effect<PromptResponse, ACPError.Failure>
   readonly cancel: (input: CancelNotification) => Effect.Effect<void>
@@ -58,8 +58,6 @@ type Turn = {
   readonly promptId: string
   /** UTC ms when the turn started (grok's `turnStartMs`). */
   readonly turnStartMs: number
-  /** Monotonic per-turn update counter used to build `eventId`. */
-  readonly seq: Ref.Ref<number>
   /** UTC ms when the current LLM step started (grok's `streamStartMs`). */
   readonly streamStartMs: Ref.Ref<number>
 }
@@ -107,7 +105,6 @@ export const make = Effect.fnUntraced(function* (input: {
       background: false,
       promptId,
       turnStartMs,
-      seq: yield* Ref.make(0),
       streamStartMs: yield* Ref.make(turnStartMs),
     } satisfies Turn
   })
@@ -160,11 +157,10 @@ export const make = Effect.fnUntraced(function* (input: {
    * timestamps, a replay marker, and a monotonic `eventId`.
    *
    * This lives at the turn boundary (not in `connection.sessionUpdate`) because
-   * only the turn knows the prompt context and the per-turn sequence.
+   * only the turn knows the prompt context and the stream start.
    */
   const stamp = (turn: Turn, update: ACPTranslate.Output & { _tag: "SessionUpdate" }) =>
     Effect.gen(function* () {
-      const seq = yield* Ref.updateAndGet(turn.seq, (value) => value + 1)
       const streamStartMs = yield* Ref.get(turn.streamStartMs)
       return {
         update: update.update,
@@ -172,7 +168,7 @@ export const make = Effect.fnUntraced(function* (input: {
           promptId: turn.promptId,
           turnStartMs: turn.turnStartMs,
           streamStartMs,
-          eventId: `${turn.ctx.sessionID}-${seq}`,
+          eventId: nextEventId(turn.ctx.sessionID),
         },
       }
     })

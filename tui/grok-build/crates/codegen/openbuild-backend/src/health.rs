@@ -122,6 +122,18 @@ pub fn exit() -> Option<BridgeExit> {
     active().and_then(|health| health.read())
 }
 
+/// Record a death the TUI observed itself.
+///
+/// The bridge normally records the exit before it cancels, but the two events
+/// race: a closed ACP channel can be seen while the bridge thread is still
+/// reaping the child. Publishing the observed reason keeps [`is_dead`] — and
+/// therefore `/reconnect` — consistent with the notice the user just saw.
+pub fn record(exit: BridgeExit) {
+    if let Some(health) = active() {
+        health.record(exit);
+    }
+}
+
 /// Whether the kernel is known to have died and has not been reconnected yet.
 pub fn is_dead() -> bool {
     exit().is_some_and(BridgeExit::is_kernel_exit)
