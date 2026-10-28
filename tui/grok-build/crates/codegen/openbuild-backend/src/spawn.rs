@@ -1,5 +1,8 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use crate::proxy;
 
 /// How the kernel process should be launched.
 #[derive(Debug, Clone)]
@@ -71,7 +74,30 @@ pub fn default_spec(kernel_path: Option<PathBuf>) -> Option<SpawnSpec> {
             dir.to_string_lossy().into_owned(),
         ));
     }
+    // The kernel performs every model request, and Bun only consults the proxy
+    // variables — it ignores the Windows system proxy and never falls back on a
+    // proxy that refuses connections. Resolve one answer here, once per process,
+    // so every kernel launch (TUI, relay, examples) behaves the same.
+    spec.env.extend(kernel_proxy_env());
     Some(spec)
+}
+
+/// Resolve the proxy once per process.
+///
+/// The probe may cost a few hundred milliseconds, and the TUI can spawn the
+/// kernel more than once (initial start plus reconnects); the environment does
+/// not change mid-run.
+fn kernel_proxy_env() -> Vec<(String, String)> {
+    proxy::kernel_env(active_proxy())
+}
+
+/// The proxy decision this process launched the kernel with.
+///
+/// Always the same answer as [`kernel_proxy_env`], so `/backend` reports what
+/// the running kernel was actually told.
+pub fn active_proxy() -> &'static proxy::Decision {
+    static DECISION: OnceLock<proxy::Decision> = OnceLock::new();
+    DECISION.get_or_init(proxy::detect)
 }
 
 /// The config directory the kernel would use on its own.

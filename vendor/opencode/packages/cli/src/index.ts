@@ -18,8 +18,14 @@ import { EffectFlock } from "@opencode/util/effect-flock"
 import { Heap } from "./heap"
 import { CpuProfile } from "./cpu-profile"
 import { ShutdownDeadline } from "./shutdown-deadline"
+import { Proxy } from "./net/proxy"
 
 ensurePluginRuntime()
+
+// Route model and tool traffic through the proxy the TUI resolved, falling back
+// to a direct connection when the proxy cannot be reached. Must run before any
+// module-level client captures `globalThis.fetch`.
+Proxy.install()
 
 if (process.env.OPENCODE_SSH_ASKPASS_PORT) {
   const { askpass } = await import("./ssh-askpass")
@@ -107,6 +113,7 @@ Effect.gen(function* () {
     channel: OPENCODE_CHANNEL,
     local: OPENCODE_LOCAL,
     args: process.argv.slice(2),
+    proxy: Proxy.describe(),
   })
   return yield* Runtime.run(Commands, Handlers, { version: OPENCODE_VERSION })
 }).pipe(

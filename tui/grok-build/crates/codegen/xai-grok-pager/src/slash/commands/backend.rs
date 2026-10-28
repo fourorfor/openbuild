@@ -46,6 +46,10 @@ pub fn report() -> String {
         lines.push(format!("Kernel: {}", path.display()));
     }
     lines.push(format!("Capabilities: {}", describe_capabilities(profile)));
+    lines.push(format!(
+        "Proxy: {}",
+        openbuild_backend::proxy::describe(openbuild_backend::spawn::active_proxy())
+    ));
     if let Some(status) = openbuild_backend::http_feed::active_status() {
         let mut line = format!(
             "HTTP feed: {} ({} events, {} dropped, {} reconnects)",
