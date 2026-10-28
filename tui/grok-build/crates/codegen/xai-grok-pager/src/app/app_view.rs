@@ -880,6 +880,8 @@ pub struct AppView {
     pub mouse_captured: bool,
     /// Active "New Worktree" dialog on the welcome screen.
     pub new_worktree_dialog: Option<NewWorktreeDialogState>,
+    /// `/login`: third-party provider setup wizard, on any screen.
+    pub provider_setup: Option<crate::views::provider_setup::ProviderSetupState>,
     /// Default all ON.
     /// Resolved at startup and on settings toggles.
     /// Precedence: `GROK_CONTEXTUAL_HINTS` (master) > `[ui.contextual_hints]` user config > remote tier > default.
@@ -1489,6 +1491,7 @@ impl AppView {
             welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
+            provider_setup: None,
             contextual_hints: Default::default(),
             remote_contextual_hints: None,
             tip_seen_counts: Default::default(),
@@ -2295,6 +2298,28 @@ impl AppView {
                     | MouseEventKind::Moved
             );
             if is_mouse_action {}
+        }
+        if let Some(state) = self.provider_setup.as_mut() {
+            use crate::views::provider_setup::ProviderSetupOutcome;
+            let outcome = match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => state.handle_key(key),
+                Event::Paste(text) => state.insert_paste(text),
+                Event::Resize(_, _) => return InputOutcome::Changed,
+                // The form has no mouse targets; swallow clicks so they cannot
+                // reach the transcript underneath the dialog.
+                Event::Mouse(_) => return InputOutcome::Changed,
+                _ => ProviderSetupOutcome::Unchanged,
+            };
+            return match outcome {
+                ProviderSetupOutcome::Submitted(submission) => {
+                    InputOutcome::Action(Action::ProviderSetupSubmit(submission))
+                }
+                ProviderSetupOutcome::Cancelled => {
+                    InputOutcome::Action(Action::ProviderSetupCancel)
+                }
+                ProviderSetupOutcome::Changed => InputOutcome::Changed,
+                ProviderSetupOutcome::Unchanged => InputOutcome::Unchanged,
+            };
         }
         if let Some(tutorial) = self.tutorial.as_mut()
             && matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_))
@@ -4544,6 +4569,13 @@ impl AppView {
                                     dialog,
                                 );
                             }
+                            if let Some(state) = self.provider_setup.as_ref() {
+                                crate::views::provider_setup::render_provider_setup(
+                                    view_area,
+                                    f.buffer_mut(),
+                                    state,
+                                );
+                            }
                             if let Some(crate::views::modal::ActiveModal::DocViewer {
                                 ref title,
                                 ref content,
@@ -4726,6 +4758,13 @@ impl AppView {
                                         modal,
                                         &theme,
                                         compact,
+                                    );
+                                }
+                                if let Some(state) = self.provider_setup.as_ref() {
+                                    crate::views::provider_setup::render_provider_setup(
+                                        view_area,
+                                        f.buffer_mut(),
+                                        state,
                                     );
                                 }
                                 if let Some(tutorial) = self.tutorial.as_mut() {
@@ -5031,6 +5070,7 @@ impl AppView {
         matches!(self.active_view, ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| a.extensions_modal.is_some() || a.active_modal.is_some()))
             || self.import_claude_modal.is_some()
             || self.new_worktree_dialog.is_some()
+            || self.provider_setup.is_some()
             || self.welcome_doc_viewer.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard

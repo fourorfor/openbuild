@@ -40,6 +40,7 @@ pub mod privacy_banner;
 pub mod progress_bar;
 pub mod prompt_suggestion;
 pub mod prompt_widget;
+pub mod provider_setup;
 pub mod question_view;
 pub(crate) mod queue_mutation;
 pub mod queue_pane;

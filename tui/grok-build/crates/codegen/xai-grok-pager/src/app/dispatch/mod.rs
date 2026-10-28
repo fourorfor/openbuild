@@ -24,6 +24,7 @@ pub(crate) mod notes;
 mod permissions;
 mod prompt;
 mod prompt_ack;
+mod providers;
 mod queue;
 mod rewind;
 mod router;

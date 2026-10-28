@@ -701,6 +701,16 @@ pub enum Action {
     SetUncensoredMode(bool),
     /// Show `/uncensored status`: mode, model, and installed plugin state.
     ShowUncensoredStatus,
+    /// `/login`: open the third-party provider setup wizard.
+    OpenProviderSetup,
+    /// `/login status`: show providers this wizard configured.
+    ShowProviderStatus,
+    /// `/login remove <id>`: delete one provider from the managed file.
+    RemoveProvider(String),
+    /// Wizard confirmed: write the provider into the kernel config.
+    ProviderSetupSubmit(crate::views::provider_setup::ProviderSetupSubmission),
+    /// Wizard dismissed with Esc.
+    ProviderSetupCancel,
     /// Open the feedback modal (every screen mode).
     /// The payload's images were drained at slash-execution time; the modal composer adopts them as chips.
     OpenFeedbackModal(crate::views::feedback_modal::OpenFeedbackModal),
