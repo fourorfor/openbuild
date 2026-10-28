@@ -629,19 +629,16 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
     let mut meta = build_initialize_meta(flags).as_object().cloned();
     crate::app::session_startup::stamp_phase_traceparent(&mut meta);
     let mut capabilities = acp::ClientCapabilities::new()
-        .fs(
-            acp::FileSystemCapabilities::new()
-                .read_text_file(flags.fs_read)
-                .write_text_file(flags.fs_write),
-        )
+        .fs(acp::FileSystemCapabilities::new()
+            .read_text_file(flags.fs_read)
+            .write_text_file(flags.fs_write))
         .terminal(flags.terminal)
         .meta(client_capabilities_meta(flags).as_object().cloned());
     if openbuild_backend::profile::is_opencode() {
         // opencode's question tool uses ACP form elicitation. Without this the
         // kernel cancels the form and returns the question to the model.
         capabilities = capabilities.elicitation(
-            acp::ElicitationCapabilities::new()
-                .form(acp::ElicitationFormCapabilities::default()),
+            acp::ElicitationCapabilities::new().form(acp::ElicitationFormCapabilities::default()),
         );
     }
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)

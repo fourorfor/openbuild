@@ -12,7 +12,12 @@ pub fn run(shell: Shell) {
     // Always emit the public CLI name, whatever the binary is called on disk.
     let mut cmd = PagerArgs::command().name(crate::branding::CLI_NAME);
     if shell != Shell::Zsh {
-        generate(shell, &mut cmd, crate::branding::CLI_NAME, &mut std::io::stdout());
+        generate(
+            shell,
+            &mut cmd,
+            crate::branding::CLI_NAME,
+            &mut std::io::stdout(),
+        );
         return;
     }
     // zsh needs post-processing (see fix_zsh_root_prompt_positional).
@@ -102,6 +107,9 @@ mod tests {
             "nested subcommand dispatch must be untouched"
         );
         // The subcommand list itself must still be offered at the root.
-        assert!(fixed.contains("_openbuild_commands"), "root command list intact");
+        assert!(
+            fixed.contains("_openbuild_commands"),
+            "root command list intact"
+        );
     }
 }

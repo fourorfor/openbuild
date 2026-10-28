@@ -5,7 +5,7 @@
 //! (queue, rewind, workflows, …), so the answer has to be inspectable from
 //! inside the app rather than inferred from a missing menu row.
 
-use crate::slash::command::{CommandResult, CommandExecCtx, SlashCommand, slash_meta};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Report the active backend and the capabilities it advertised.
 pub struct BackendCommand;
@@ -136,8 +136,8 @@ fn describe_capabilities(profile: &openbuild_backend::BackendProfile) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::commands::tests::make_ctx;
     use crate::acp::model_state::ModelState;
+    use crate::slash::commands::tests::make_ctx;
 
     fn ctx() -> CommandExecCtx<'static> {
         // The report only reads the process-wide profile, so the ctx contents

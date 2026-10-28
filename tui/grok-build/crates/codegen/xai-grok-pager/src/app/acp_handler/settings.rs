@@ -8,10 +8,7 @@ use serde::Deserialize;
 /// status bar and pickers read `ModelState`, so the selection is copied across;
 /// unknown option ids are ignored (a newer kernel may add options this build
 /// has no UI for).
-pub(super) fn apply_config_options(
-    agent: &mut AgentView,
-    options: &[acp::SessionConfigOption],
-) {
+pub(super) fn apply_config_options(agent: &mut AgentView, options: &[acp::SessionConfigOption]) {
     let parsed = openbuild_backend::ConfigOptions::parse(options);
 
     if let Some(model) = parsed.model.as_ref()
@@ -68,10 +65,8 @@ fn catalog_entry_for(model: &openbuild_backend::SelectOption) -> Option<acp::Mod
     if let Some(description) = value.description.as_ref() {
         meta.insert("description".to_string(), serde_json::json!(description));
     }
-    let mut info = acp::ModelInfo::new(
-        acp::ModelId::new(model.current.clone()),
-        value.name.clone(),
-    );
+    let mut info =
+        acp::ModelInfo::new(acp::ModelId::new(model.current.clone()), value.name.clone());
     info.meta = Some(meta);
     Some(info)
 }

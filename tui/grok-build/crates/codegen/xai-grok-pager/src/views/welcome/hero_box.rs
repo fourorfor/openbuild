@@ -27,8 +27,8 @@ const LOGO_H_PAD: u16 = 3;
 const UPGRADE_CTA_ROWS: u16 = 2;
 
 use super::logo::LogoTier;
-use crate::branding::HERO_SUBTITLE;
 use super::{PROMPT_HEIGHT, VERSION_GAP};
+use crate::branding::HERO_SUBTITLE;
 
 /// Rows the "thanks" subtitle occupies.
 /// Hidden when the in-box info slot (changelog or announcement) is shown, to keep the box compact.

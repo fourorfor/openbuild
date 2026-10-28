@@ -12,6 +12,8 @@
 //! Subcommands:
 //!
 //! - `/login` — show config status and open the setup form
+//! - `/login add` — same as bare `/login`; listed in the picker so the form is
+//!   discoverable from the argument dropdown, not only from a bare command
 //! - `/login status` — show config status only
 //! - `/login remove <id>` — drop a provider this wizard added
 //! - `/login account` — the original xAI account login
@@ -25,10 +27,10 @@ impl SlashCommand for LoginCommand {
     slash_meta! {
         name: "login",
         description: "Connect a third-party model provider",
-        usage: "/login [status|remove <id>|account]",
+        usage: "/login [add|status|remove <id>|account]",
         takes_args: true,
         args_required: false,
-        arg_placeholder: "<status|remove <id>|account>",
+        arg_placeholder: "<add|status|remove <id>|account>",
     }
 
     /// Offered either for the provider wizard (OpenBuild backend) or when the
@@ -44,6 +46,11 @@ impl SlashCommand for LoginCommand {
         _ctx: &crate::slash::command::AppCtx,
         _args_query: &str,
     ) -> Option<Vec<crate::slash::command::ArgItem>> {
+        // With no OpenBuild backend there is no provider file to write, so the
+        // picker must not offer form-shaped arguments the command would refuse.
+        if !openbuild_backend::profile::is_opencode() {
+            return None;
+        }
         let item =
             |display: &str, insert: &str, description: &str| crate::slash::command::ArgItem {
                 display: display.to_string(),
@@ -52,6 +59,7 @@ impl SlashCommand for LoginCommand {
                 description: description.to_string(),
             };
         Some(vec![
+            item("add", "add", "Open the form and add a provider"),
             item("status", "status", "Show configured third-party providers"),
             item("remove", "remove ", "Remove a provider by id"),
             item(
@@ -70,9 +78,13 @@ impl SlashCommand for LoginCommand {
             return CommandResult::Action(Action::Login);
         }
 
+        // Subcommands are case-insensitive, matching `/uncensored`. The provider
+        // id after `remove` is NOT: ids are stored lowercase and echoed back
+        // verbatim, so lowercasing it here would hide a mismatch from the user.
         let mut parts = trimmed.split_whitespace();
-        match parts.next() {
-            None => CommandResult::Action(Action::OpenProviderSetup),
+        let verb = parts.next().map(str::to_ascii_lowercase);
+        match verb.as_deref() {
+            None | Some("add") => CommandResult::Action(Action::OpenProviderSetup),
             Some("status") => CommandResult::Action(Action::ShowProviderStatus),
             Some("account") => CommandResult::Action(Action::Login),
             Some("remove") => match parts.next() {
@@ -80,7 +92,7 @@ impl SlashCommand for LoginCommand {
                 None => CommandResult::Error("Usage: /login remove <provider-id>".to_string()),
             },
             Some(other) => CommandResult::Error(format!(
-                "Unknown /login argument: {other}. Use status, remove <id>, or account."
+                "Unknown /login argument: {other}. Use add, status, remove <id>, or account."
             )),
         }
     }
@@ -143,6 +155,50 @@ mod tests {
             LoginCommand.run(&mut context, "account"),
             CommandResult::Action(Action::Login)
         ));
+    }
+
+    #[test]
+    fn add_opens_the_same_form_as_bare_login() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let Some(mut context) = openbuild_ctx(&models, &bundle) else {
+            return;
+        };
+        assert!(matches!(
+            LoginCommand.run(&mut context, "add"),
+            CommandResult::Action(Action::OpenProviderSetup)
+        ));
+        assert!(matches!(
+            LoginCommand.run(&mut context, "  ADD  "),
+            CommandResult::Action(Action::OpenProviderSetup)
+        ));
+    }
+
+    #[test]
+    fn the_picker_offers_the_add_entry_first() {
+        let models = ModelState::default();
+        openbuild_backend::profile::set_kind(openbuild_backend::BackendKind::OpenCode);
+        if !openbuild_backend::profile::is_opencode() {
+            return;
+        }
+        let ctx = crate::slash::command::AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = LoginCommand
+            .suggest_args(&ctx, "")
+            .expect("the OpenBuild backend must offer provider arguments");
+        assert_eq!(items[0].insert_text, "add");
+        assert!(items.iter().any(|i| i.insert_text == "status"));
+        assert!(items.iter().any(|i| i.insert_text == "account"));
     }
 
     #[test]

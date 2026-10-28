@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::slash::command::{CommandResult, CommandExecCtx, SlashCommand, slash_meta};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Wall-clock ceiling for a kernel subcommand. `plugin add` may hit the network;
 /// everything else is local, and a hung child must not freeze the TUI.
@@ -58,23 +58,34 @@ impl SlashCommand for KernelCommand {
         _ctx: &crate::slash::command::AppCtx,
         _args_query: &str,
     ) -> Option<Vec<crate::slash::command::ArgItem>> {
-        let item = |display: &str, insert: &str, description: &str| {
-            crate::slash::command::ArgItem {
+        let item =
+            |display: &str, insert: &str, description: &str| crate::slash::command::ArgItem {
                 display: display.to_string(),
                 match_text: format!("{display} {description}"),
                 insert_text: insert.to_string(),
                 description: description.to_string(),
-            }
-        };
+            };
         Some(vec![
-            item("plugin list", "plugin list", "List installed kernel plugins"),
+            item(
+                "plugin list",
+                "plugin list",
+                "List installed kernel plugins",
+            ),
             item(
                 "plugin check",
                 "plugin check",
                 "Check loaded state and updates for kernel plugins",
             ),
-            item("plugin add", "plugin add ", "Install a kernel plugin package"),
-            item("plugin remove", "plugin remove ", "Uninstall a kernel plugin"),
+            item(
+                "plugin add",
+                "plugin add ",
+                "Install a kernel plugin package",
+            ),
+            item(
+                "plugin remove",
+                "plugin remove ",
+                "Uninstall a kernel plugin",
+            ),
             item("mcp list", "mcp list", "List configured MCP servers"),
             item("mcp add", "mcp add ", "Add an MCP server"),
             item("mcp remove", "mcp remove ", "Remove an MCP server"),
@@ -231,10 +242,7 @@ fn indent(text: &str) -> String {
 /// here, so a hung kernel would freeze the whole interface. Both pipes are
 /// drained on their own threads: a child that writes more than one pipe buffer
 /// would otherwise block forever while the parent is only polling `try_wait`.
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Result<String, String> {
+fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Result<String, String> {
     use std::io::Read;
 
     let reader = |pipe: Option<Box<dyn Read + Send>>| {

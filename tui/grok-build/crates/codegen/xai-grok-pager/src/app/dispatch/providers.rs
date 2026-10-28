@@ -137,7 +137,7 @@ fn status_block() -> String {
         None => lines.push("Default model in this file: (none)".to_string()),
     }
     if configured.is_empty() {
-        lines.push("Configured here: (none yet — fill in the form below)".to_string());
+        lines.push("Configured here: (none yet)".to_string());
     } else {
         lines.push(format!("Configured here ({}):", configured.len()));
         for provider in &configured {
@@ -155,6 +155,13 @@ fn status_block() -> String {
     lines.push(
         "Anything in openbuild.jsonc keeps priority; providers merge per id, but a `model` \
          there still wins."
+            .to_string(),
+    );
+    // `status` is often the first thing a user tries. End with the command that
+    // actually opens the form instead of leaving them to guess.
+    lines.push(
+        "Add or change one: run `/login` (or `/login add`) to open the form. \
+         `/login remove <id>` deletes one."
             .to_string(),
     );
     lines.join("\n")

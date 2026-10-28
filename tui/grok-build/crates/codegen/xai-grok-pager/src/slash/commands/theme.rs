@@ -282,7 +282,10 @@ fn list_themes() -> String {
 fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~") {
         if let Some(home) = xai_dirs::home_dir() {
-            return home.join(rest.trim_start_matches(['/', '\\'])).to_string_lossy().into_owned();
+            return home
+                .join(rest.trim_start_matches(['/', '\\']))
+                .to_string_lossy()
+                .into_owned();
         }
     }
     path.to_string()
@@ -969,7 +972,8 @@ mod tests {
             assert!(msg.contains("Imported:"), "{msg}");
             // The imported theme is the one in effect, so it carries the marker.
             assert!(
-                msg.lines().any(|l| l.contains("fixture-dark") && l.contains('*')),
+                msg.lines()
+                    .any(|l| l.contains("fixture-dark") && l.contains('*')),
                 "{msg}"
             );
         });

@@ -1034,11 +1034,8 @@ fn render_welcome_trust(
         .alignment(Alignment::Center),
         Line::default(),
         // Two lines so the warning never clips at narrow / compact widths (a single ~78-char line would truncate "...posing security risks")
-        Line::from(Span::styled(
-            trust_warning,
-            Style::default().fg(theme.gray),
-        ))
-        .alignment(Alignment::Center),
+        Line::from(Span::styled(trust_warning, Style::default().fg(theme.gray)))
+            .alignment(Alignment::Center),
         Line::from(Span::styled(
             "posing security risks.",
             Style::default().fg(theme.gray),

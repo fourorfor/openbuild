@@ -562,13 +562,10 @@ fn start_kernel_reconnect(
                             Ok(resp) => loads.push(AgentLoadOutcome {
                                 agent_id,
                                 success: true,
-                                running_prompt_id:
-                                    effects::parse_session_load_running_prompt_id(
-                                        resp.meta.as_ref(),
-                                    ),
-                                memory_mode: effects::parse_session_memory_mode(
+                                running_prompt_id: effects::parse_session_load_running_prompt_id(
                                     resp.meta.as_ref(),
                                 ),
+                                memory_mode: effects::parse_session_memory_mode(resp.meta.as_ref()),
                             }),
                             Err(e) => {
                                 tracing::error!(

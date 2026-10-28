@@ -66,8 +66,16 @@ fn notification_sequence(
         // Body-only protocols fold the title (session name) into the body.
         // OSC 777 already uses the tab title as subtitle, so keep the product name.
         NotificationProtocol::Osc9 => format!("\x1b]9;{body} \u{b7} {title}\x07").into(),
-        NotificationProtocol::Osc99 => format!("\x1b]99;i={};{body} \u{b7} {title}\x1b\\", crate::branding::PRODUCT_SHORT).into(),
-        NotificationProtocol::Osc777 => format!("\x1b]777;notify;{};{body}\x1b\\", crate::branding::PRODUCT_SHORT).into(),
+        NotificationProtocol::Osc99 => format!(
+            "\x1b]99;i={};{body} \u{b7} {title}\x1b\\",
+            crate::branding::PRODUCT_SHORT
+        )
+        .into(),
+        NotificationProtocol::Osc777 => format!(
+            "\x1b]777;notify;{};{body}\x1b\\",
+            crate::branding::PRODUCT_SHORT
+        )
+        .into(),
         NotificationProtocol::Bel => Cow::Borrowed("\x07"),
         NotificationProtocol::None => return None,
     })
@@ -214,7 +222,14 @@ mod tests {
         let (writer, rx) = capture_writer();
         emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx, &writer);
         let payload = rx.try_recv().expect("one payload enqueued");
-        assert_eq!(payload.data(), format!("\x1b]777;notify;{};body\x1b\\", crate::branding::PRODUCT_SHORT).as_bytes());
+        assert_eq!(
+            payload.data(),
+            format!(
+                "\x1b]777;notify;{};body\x1b\\",
+                crate::branding::PRODUCT_SHORT
+            )
+            .as_bytes()
+        );
     }
 
     #[test]
@@ -240,11 +255,23 @@ mod tests {
     fn notification_sequence_osc99_and_osc777_strip_controls() {
         let osc99 = notification_sequence(NotificationProtocol::Osc99, "t\x1b", "b\x07")
             .expect("osc99 yields a sequence");
-        assert_eq!(osc99.as_ref(), format!("\x1b]99;i={};b \u{b7} t\x1b\\", crate::branding::PRODUCT_SHORT));
+        assert_eq!(
+            osc99.as_ref(),
+            format!(
+                "\x1b]99;i={};b \u{b7} t\x1b\\",
+                crate::branding::PRODUCT_SHORT
+            )
+        );
 
         let osc777 = notification_sequence(NotificationProtocol::Osc777, "ignored\x1b", "b\x1body")
             .expect("osc777 yields a sequence");
-        assert_eq!(osc777.as_ref(), format!("\x1b]777;notify;{};body\x1b\\", crate::branding::PRODUCT_SHORT));
+        assert_eq!(
+            osc777.as_ref(),
+            format!(
+                "\x1b]777;notify;{};body\x1b\\",
+                crate::branding::PRODUCT_SHORT
+            )
+        );
     }
 
     #[test]

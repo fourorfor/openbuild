@@ -51,6 +51,34 @@ fn no_login_method_error(app: &AppView) -> String {
     }
 }
 
+/// Tell the user why `/login account` did nothing.
+///
+/// `dispatch_login` bails out **before** it can switch to the welcome screen,
+/// so without this the command is indistinguishable from a no-op. Inside a
+/// session the explanation goes into the transcript (where the user typed the
+/// command); on the welcome screen a toast is enough because the pending error
+/// is rendered there already.
+fn report_unavailable_login(app: &mut AppView, error: &str) {
+    let text = format!(
+        "No account to sign in to.\n\
+         This build talks to the ACP kernel, which advertises no interactive account \
+         login (it lists only a non-interactive marker method).\n\
+         To use a third-party model, run `/login` (or `/login add`) and fill in the form. \
+         `/login status` shows what is already configured.\n\
+         Kernel reported: {error}"
+    );
+    match app.active_view {
+        ActiveView::Agent(id) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.scrollback.push_block(RenderBlock::system(text));
+                return;
+            }
+            app.show_toast("Account login is not available in this build.");
+        }
+        _ => app.show_toast("Account login is not available in this build."),
+    }
+}
+
 /// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll (single-flight).
 /// A new login must not stack device-code mints or let a stale poll steal the successor's URL.
 /// No-op when not authenticating or when the abort handles have not been installed yet.
@@ -85,9 +113,13 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
 
     let Some(method_id) = app.login_method_id.clone() else {
+        let error = no_login_method_error(app);
         app.auth_state = AuthState::Pending {
-            error: Some(no_login_method_error(app)),
+            error: Some(error.clone()),
         };
+        // Same silent-failure shape as `/login`: without a visible message a
+        // mid-session account switch looks like a dead command.
+        report_unavailable_login(app, &error);
         return vec![];
     };
 
@@ -221,9 +253,15 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     }
     ensure_login_method(app);
     let Some(method_id) = app.login_method_id.clone() else {
+        // No interactive method means the auth UI has nothing to render. Set
+        // the state (the welcome screen reads it on a later visit) *and* say so
+        // out loud: from inside a session the view never switches to Welcome,
+        // so setting the state alone looks like the command did nothing.
+        let error = no_login_method_error(app);
         app.auth_state = AuthState::Pending {
-            error: Some(no_login_method_error(app)),
+            error: Some(error.clone()),
         };
+        report_unavailable_login(app, &error);
         return vec![];
     };
 

@@ -542,11 +542,9 @@ fn fix_preview_contains_exact_change_and_caveats() {
     let preview = String::from_utf8(preview).unwrap();
     assert_eq!(preview, crate::diagnostics::format_fix_preview(&plan));
     assert!(preview.contains("File: "));
-    assert!(
-        preview.contains(
-            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='openbuild wrap ssh'"
-        )
-    );
+    assert!(preview.contains(
+        "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='openbuild wrap ssh'"
+    ));
     assert!(preview.contains("To use once without changing config: `openbuild wrap ssh <host>`"));
     assert!(preview.contains("Use `command ssh ...` to bypass the alias."));
     assert!(preview.contains("ssh -f"));

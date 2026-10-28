@@ -1778,7 +1778,10 @@ mod tests {
         );
         assert_eq!(terminal_title_string("\x07\x1b\x00"), short);
         assert_eq!(terminal_title_string(""), short);
-        assert_eq!(terminal_title_string("My chat"), format!("My chat - {short}"));
+        assert_eq!(
+            terminal_title_string("My chat"),
+            format!("My chat - {short}")
+        );
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
