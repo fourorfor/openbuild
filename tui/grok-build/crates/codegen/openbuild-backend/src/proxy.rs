@@ -288,8 +288,11 @@ pub fn detect() -> Decision {
 
 /// The environment additions that make the kernel obey `decision`.
 ///
-/// A non-proxy decision actively clears the ambient variables: otherwise a
-/// stale `HTTPS_PROXY` from the parent shell would keep overriding the choice.
+/// Only a proxy the TUI rejected as unreachable is actively blocked. Writing an
+/// empty `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` for `Disabled` used to disable
+/// Bun's own proxy support as well: a user who turns the OpenBuild router off
+/// while keeping a working proxy in the environment then got direct connections
+/// instead of the proxy, which is the opposite of what `off` should mean.
 pub fn kernel_env(decision: &Decision) -> Vec<(String, String)> {
     match decision {
         Decision::Use(proxy) => vec![
@@ -298,7 +301,14 @@ pub fn kernel_env(decision: &Decision) -> Vec<(String, String)> {
             ("ALL_PROXY".to_string(), proxy.url.clone()),
             (PROXY_ENV.to_string(), proxy.url.clone()),
         ],
-        Decision::Disabled | Decision::Unconfigured | Decision::Unreachable(_) => vec![
+        // `off` hands the decision back to Bun: the router stays out of the way
+        // but any proxy already in the environment keeps working.
+        Decision::Disabled => vec![(PROXY_ENV.to_string(), "off".to_string())],
+        // Nothing was configured, so there is nothing to add or remove.
+        Decision::Unconfigured => vec![(PROXY_ENV.to_string(), "off".to_string())],
+        // The configured proxy refused a connection. Clear the ambient variables
+        // so Bun does not retry the same dead endpoint.
+        Decision::Unreachable(_) => vec![
             ("HTTPS_PROXY".to_string(), String::new()),
             ("HTTP_PROXY".to_string(), String::new()),
             ("ALL_PROXY".to_string(), String::new()),
@@ -469,17 +479,29 @@ mod tests {
         )));
     }
 
+    /// `off` must leave Bun's own proxy support alone: clearing the variables
+    /// turned "stop the OpenBuild router" into "stop using any proxy", so a
+    /// working `HTTPS_PROXY` in the environment was silently discarded.
     #[test]
-    fn kernel_env_clears_stale_proxy_variables_when_disabled() {
+    fn kernel_env_leaves_the_ambient_proxy_alone_when_disabled() {
         for decision in [Decision::Disabled, Decision::Unconfigured] {
             let env = kernel_env(&decision);
-            for name in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"] {
-                assert!(
-                    env.contains(&(name.to_string(), String::new())),
-                    "{name} must be cleared for {decision:?}"
-                );
-            }
+            assert_eq!(env, vec![(PROXY_ENV.to_string(), "off".to_string())], "{decision:?}");
         }
+    }
+
+    /// A proxy the TUI probed and found unreachable is still cleared, otherwise
+    /// Bun would retry the dead endpoint on every request.
+    #[test]
+    fn kernel_env_clears_the_variables_of_an_unreachable_proxy() {
+        let env = kernel_env(&Decision::Unreachable("http://127.0.0.1:10808".to_string()));
+        for name in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"] {
+            assert!(
+                env.contains(&(name.to_string(), String::new())),
+                "{name} must be cleared so Bun stops retrying the dead proxy"
+            );
+        }
+        assert!(env.contains(&(PROXY_ENV.to_string(), "off".to_string())));
     }
 
     #[test]

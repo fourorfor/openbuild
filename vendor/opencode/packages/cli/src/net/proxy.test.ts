@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isTransportFailure, normalise, readConfig, route } from "./proxy"
+import { isLocalTarget, isTransportFailure, normalise, readConfig, route } from "./proxy"
 
 /** A transport that records calls and answers with the given behaviour. */
 function fakeTransport(answer: (init: RequestInit | undefined, call: number) => Promise<Response>) {
@@ -152,6 +152,76 @@ describe("route", () => {
     await router.fetch("https://example.test/3")
     expect((calls[3]!.init as { proxy?: string }).proxy).toBe("http://127.0.0.1:9")
   })
+
+  // The kernel probes local servers (Ollama on 11434, LM Studio on 1234). Those
+  // probes cannot go through an outbound proxy, and while the cool-down was
+  // process-wide their refusal pushed model traffic onto the direct path for a
+  // minute. On a machine whose direct route never answers, the request hung.
+  test("a failed local probe does not send the next model request direct", async () => {
+    const { transport, calls } = fakeTransport((init) =>
+      (init as { proxy?: string } | undefined)?.proxy === undefined
+        ? Promise.reject(new TypeError("ECONNREFUSED: Unable to connect"))
+        : ok(),
+    )
+    const router = route({ env: { OPENBUILD_PROXY: "http://127.0.0.1:10808" }, transport })
+    // Nothing listens on 11434, so the probe fails; the model request must still be
+    // offered to the proxy instead of inheriting that failure as a cool-down.
+    await expect(router.fetch("http://127.0.0.1:11434/api/tags")).rejects.toThrow()
+    const response = await router.fetch("https://d1api.xin/v1/chat/completions")
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect((calls[0]!.init as { proxy?: string } | undefined)?.proxy).toBeUndefined()
+    expect((calls[1]!.init as { proxy?: string }).proxy).toBe("http://127.0.0.1:10808")
+  })
+
+  test("local targets never go through the proxy", async () => {
+    const { transport, calls } = fakeTransport(ok)
+    const router = route({ env: { OPENBUILD_PROXY: "http://127.0.0.1:10808" }, transport })
+    for (const url of [
+      "http://localhost:4096/health",
+      "http://127.0.0.1:1234/v1/models",
+      "http://192.168.1.20:8080/x",
+      "http://ollama:11434/api/tags",
+    ]) {
+      await router.fetch(url)
+    }
+    for (const call of calls) {
+      expect((call.init as { proxy?: string } | undefined)?.proxy).toBeUndefined()
+    }
+    expect(isLocalTarget("d1api.xin:443")).toBe(false)
+  })
+
+  test("a cool-down is scoped to the host that failed", async () => {
+    let clock = 1_000
+    const { transport, calls } = fakeTransport((_init, call) =>
+      call === 1 ? Promise.reject(new TypeError("ECONNREFUSED")) : ok(),
+    )
+    const router = route({ env: { OPENBUILD_PROXY: "http://127.0.0.1:9" }, transport, now: () => clock })
+    await router.fetch("https://broken.example/1")
+    clock += 1_000
+    await router.fetch("https://healthy.example/2")
+    expect(calls).toHaveLength(3)
+    expect((calls[2]!.init as { proxy?: string }).proxy).toBe("http://127.0.0.1:9")
+  })
+
+  test("a proxy that never answers headers falls back to a direct request", async () => {
+    // A header-only deadline is what keeps an accepting-but-silent proxy from
+    // hanging the request forever; the body is deliberately not covered.
+    const { transport, calls } = fakeTransport((init, call) => {
+      if (call === 1) return new Promise<Response>(() => {})
+      expect((init as { proxy?: string } | undefined)?.proxy).toBeUndefined()
+      return ok()
+    })
+    const router = route({
+      env: { OPENBUILD_PROXY: "http://127.0.0.1:10808" },
+      transport,
+      headerDeadlineMs: 20,
+    })
+    const response = await router.fetch("https://example.test/v1/models")
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect(router.state.failures).toBe(1)
+  }, 40_000)
 
   test("a direct configuration sends no proxy option", async () => {
     const { transport, calls } = fakeTransport(ok)

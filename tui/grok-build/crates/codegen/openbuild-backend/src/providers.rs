@@ -446,6 +446,60 @@ pub fn configured_default_model_in(config_dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Why the kernel may not be running the model this file configures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultModelGap {
+    /// No top-level `model`, so the kernel falls back to its built-in default.
+    Unset,
+    /// `model` names a provider/model the file does not define.
+    Unresolvable(String),
+}
+
+/// Detect the "providers configured, no usable default" state.
+///
+/// A provider alone does not select a model: the kernel reads the top-level
+/// `model` and otherwise quietly uses its own built-in default (typically a
+/// free, much smaller-context model). The status bar then reports that model's
+/// context window, which looks like the user's own configuration was ignored.
+/// Reporting the gap is the only honest fix, because the wizard must not
+/// overwrite a choice the user may have made by hand.
+pub fn default_model_gap_in(config_dir: &Path) -> Option<DefaultModelGap> {
+    let root = read_json(&managed_path(config_dir))?;
+    let providers = root.get("providers").and_then(Value::as_object)?;
+    if providers.is_empty() {
+        return None;
+    }
+    let configured = root.get("model").and_then(Value::as_str).map(str::trim);
+    let Some(model) = configured.filter(|value| !value.is_empty()) else {
+        return Some(DefaultModelGap::Unset);
+    };
+    let Some((provider_id, model_id)) = model.split_once('/') else {
+        return Some(DefaultModelGap::Unresolvable(model.to_string()));
+    };
+    let known = providers
+        .get(provider_id)
+        .and_then(|provider| provider.get("models"))
+        .and_then(Value::as_object)
+        .is_some_and(|models| models.contains_key(model_id));
+    if known {
+        return None;
+    }
+    Some(DefaultModelGap::Unresolvable(model.to_string()))
+}
+
+/// A one-line, user-facing description of [`DefaultModelGap`].
+pub fn describe_default_model_gap(gap: &DefaultModelGap) -> String {
+    match gap {
+        DefaultModelGap::Unset => "No default model is set, so the kernel uses its built-in one \
+             (a free model with a smaller context window). Run /model to pick yours."
+            .to_string(),
+        DefaultModelGap::Unresolvable(model) => format!(
+            "Default model `{model}` is not defined in this file, so the kernel falls back to its \
+             built-in model. Run /model to pick an available one."
+        ),
+    }
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
@@ -815,5 +869,47 @@ mod tests {
         let value = parse_jsonc(r#"{"url":"https://x//y","note":"/* not a comment */"}"#).unwrap();
         assert_eq!(value["url"], "https://x//y");
         assert_eq!(value["note"], "/* not a comment */");
+    }
+
+    /// A provider alone does not select a model. The kernel then falls back to a
+    /// free built-in model with a much smaller context window, which is what the
+    /// status bar reports — the user's configuration looks ignored.
+    #[test]
+    fn a_provider_without_a_top_level_model_is_reported() {
+        let dir = TempDir::new("providers-gap-unset");
+        save_provider_in(dir.path(), &draft(), false).unwrap();
+        assert_eq!(
+            default_model_gap_in(dir.path()),
+            Some(DefaultModelGap::Unset)
+        );
+    }
+
+    #[test]
+    fn a_usable_default_model_reports_no_gap() {
+        let dir = TempDir::new("providers-gap-ok");
+        save_provider_in(dir.path(), &draft(), true).unwrap();
+        assert_eq!(default_model_gap_in(dir.path()), None);
+    }
+
+    #[test]
+    fn a_default_model_outside_the_file_is_reported() {
+        let dir = TempDir::new("providers-gap-stale");
+        let path = managed_path(dir.path());
+        std::fs::write(
+            &path,
+            r#"{"model":"gone/model","providers":{"x":{"models":{"y":{}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            default_model_gap_in(dir.path()),
+            Some(DefaultModelGap::Unresolvable("gone/model".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_file_without_providers_never_reports_a_gap() {
+        let dir = TempDir::new("providers-gap-none");
+        std::fs::write(managed_path(dir.path()), r#"{"provider":{}}"#).unwrap();
+        assert_eq!(default_model_gap_in(dir.path()), None);
     }
 }

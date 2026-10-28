@@ -136,6 +136,9 @@ fn status_block() -> String {
         Some(model) => lines.push(format!("Default model in this file: {model}")),
         None => lines.push("Default model in this file: (none)".to_string()),
     }
+    if let Some(gap) = providers::default_model_gap_in(&config_dir) {
+        lines.push(format!("⚠ {}", providers::describe_default_model_gap(&gap)));
+    }
     if configured.is_empty() {
         lines.push("Configured here: (none yet)".to_string());
     } else {
@@ -183,6 +186,34 @@ fn push_system(app: &mut AppView, text: String) {
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
+}
+
+/// Add the "providers configured but no usable default model" startup notice.
+///
+/// Called once per process from the event loop, which owns I/O; the dispatch
+/// layer must stay filesystem-free. The kernel resolves its default model when
+/// the connection is established, so that is the earliest honest moment to warn.
+pub(crate) fn note_default_model_gap(app: &mut AppView) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static NOTED: AtomicBool = AtomicBool::new(false);
+    if NOTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Some(config_dir) = providers::config_dir() else {
+        return;
+    };
+    let Some(gap) = providers::default_model_gap_in(&config_dir) else {
+        return;
+    };
+    let message = providers::describe_default_model_gap(&gap);
+    if app.startup_warnings.iter().any(|w| w.message == message) {
+        return;
+    }
+    app.startup_warnings.push(crate::startup::StartupWarning {
+        severity: crate::startup::WarningSeverity::Warning,
+        message,
+        action: None,
+    });
 }
 
 /// Route the wizard's outcome into an action.

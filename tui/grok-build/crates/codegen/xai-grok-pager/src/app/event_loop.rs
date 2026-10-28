@@ -1375,6 +1375,10 @@ pub(crate) async fn run(
             terminal.backend_mut().writer_mut().escape_writer(),
         )
     };
+    // The kernel has already resolved its default model, so a configuration with
+    // providers but no usable `model` can be reported now instead of leaving the
+    // status bar to show the built-in model's context window unexplained.
+    crate::app::dispatch::note_default_model_gap(&mut app);
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);

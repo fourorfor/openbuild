@@ -52,6 +52,7 @@ pub(in crate::app) use prompt::{
     present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip,
 };
 pub(crate) use prompt_ack::reconcile_overdue_prompt_acks;
+pub(crate) use providers::note_default_model_gap;
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, flush_held_local_queue_into_wait,
     maybe_drain_queue_and_note_peek, note_peek_page_flip, shim_renders_own_user_block,
