@@ -99,10 +99,14 @@ impl UncensoredStatus {
 
 /// Resolve the config directory the kernel will read.
 ///
-/// `OPENCODE_CONFIG_DIR` wins. Otherwise OpenBuild keeps its own config
-/// directory when the user already has one; creating `~/.config/openbuild`
-/// just to hold a plugin would silently hide an existing `~/.config/opencode`
-/// setup, so the plugin follows the kernel's own resolution instead.
+/// `OPENCODE_CONFIG_DIR` wins. Otherwise OpenBuild uses its **own** directory
+/// (`<base>/openbuild`): the kernel's default `<base>/opencode` belongs to the
+/// upstream project, so sharing it let the two tools overwrite each other's
+/// providers and plugins.
+///
+/// `base` is `XDG_CONFIG_HOME` when set (the kernel honours it the same way),
+/// else `~/.config`. [`migrate_legacy_config_dir`] moves an existing
+/// OpenBuild setup out of the upstream directory once.
 pub fn effective_config_dir() -> Option<PathBuf> {
     effective_config_dir_from(
         std::env::var_os("OPENCODE_CONFIG_DIR"),
@@ -119,16 +123,108 @@ fn effective_config_dir_from(
     if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(explicit));
     }
-    let home = PathBuf::from(home?);
-    let openbuild = home.join(".config").join("openbuild");
-    if openbuild.is_dir() {
-        return Some(openbuild);
-    }
-    let base = xdg
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
+    let base = match xdg.filter(|value| !value.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(home?).join(".config"),
+    };
+    Some(base.join("openbuild"))
+}
+
+/// The upstream `opencode` directory a pre-split OpenBuild wrote into.
+///
+/// Only read for migration; it is never modified otherwise, so somebody also
+/// running upstream opencode keeps their configuration.
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(
+            std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?,
+        )
+        .join(".config"),
+    };
     Some(base.join("opencode"))
+}
+
+/// Paths OpenBuild itself owns inside a config directory, relative to it. Only
+/// these move, so an upstream opencode install sharing the old directory keeps
+/// its own settings and its own plugins.
+const MIGRATED_FILES: [&str; 5] = [
+    "openbuild.json",
+    "openbuild.jsonc",
+    "uncensored.json",
+    "plugin/openbuild-uncensored.ts",
+    "plugins/openbuild-uncensored.ts",
+];
+
+/// What [`migrate_legacy_config_dir`] did, for the one-time notice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    /// Destination directory.
+    pub target: Option<PathBuf>,
+    /// Files and directories now living in the destination.
+    pub moved: Vec<PathBuf>,
+}
+
+impl MigrationOutcome {
+    /// Nothing existed to move, or the destination was already in use.
+    pub fn is_noop(&self) -> bool {
+        self.moved.is_empty()
+    }
+}
+
+/// Move an OpenBuild setup from `<base>/opencode` to `<base>/openbuild`, once.
+///
+/// Only runs while the destination is still empty: a user who already
+/// configured `~/.config/openbuild` must not get the old files piled on top.
+/// Moves are renames; a file that cannot be renamed is copied and the original
+/// stays put, so a failed migration never loses the provider list.
+pub fn migrate_legacy_config_dir() -> MigrationOutcome {
+    let Some(target) = effective_config_dir() else {
+        return MigrationOutcome::default();
+    };
+    // An explicit override means the user already decided where config lives.
+    if std::env::var_os("OPENCODE_CONFIG_DIR").is_some_and(|value| !value.is_empty()) {
+        return MigrationOutcome::default();
+    }
+    let Some(legacy) = legacy_config_dir() else {
+        return MigrationOutcome::default();
+    };
+    migrate_legacy_config_dir_from(&legacy, &target)
+}
+
+fn migrate_legacy_config_dir_from(legacy: &Path, target: &Path) -> MigrationOutcome {
+    let mut outcome = MigrationOutcome {
+        target: Some(target.to_path_buf()),
+        ..MigrationOutcome::default()
+    };
+    if !legacy.is_dir() {
+        return outcome;
+    }
+    if dir_has_entries(target) {
+        return outcome;
+    }
+    for name in MIGRATED_FILES {
+        let source = legacy.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let destination = target.join(name);
+        if let Some(parent) = destination.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            continue;
+        }
+        if fs::rename(&source, &destination).is_ok() || fs::copy(&source, &destination).is_ok() {
+            outcome.moved.push(destination);
+        }
+    }
+    outcome
+}
+
+fn dir_has_entries(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
 }
 
 pub fn uncensored_plugin_path(config_dir: &Path) -> PathBuf {
@@ -500,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_openbuild_dir_wins_over_xdg() {
+    fn xdg_wins_over_home_when_both_are_set() {
         let home = fixture("openbuild-home");
         let openbuild = home.join(".config").join("openbuild");
         fs::create_dir_all(&openbuild).expect("openbuild dir");
@@ -509,7 +605,8 @@ mod tests {
             Some(home.clone().into_os_string()),
             Some(OsString::from("C:\\xdg")),
         );
-        assert_eq!(resolved, Some(openbuild));
+        // The kernel honours XDG_CONFIG_HOME too, so both must agree on it.
+        assert_eq!(resolved, Some(PathBuf::from("C:\\xdg").join("openbuild")));
         let _ = fs::remove_dir_all(home);
     }
 
@@ -521,11 +618,81 @@ mod tests {
             Some(home.clone().into_os_string()),
             Some(OsString::from("C:\\xdg")),
         );
-        assert_eq!(resolved, Some(PathBuf::from("C:\\xdg").join("opencode")));
+        assert_eq!(resolved, Some(PathBuf::from("C:\\xdg").join("openbuild")));
 
         let resolved = effective_config_dir_from(None, Some(home.clone().into_os_string()), None);
-        assert_eq!(resolved, Some(home.join(".config").join("opencode")));
+        assert_eq!(resolved, Some(home.join(".config").join("openbuild")));
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_default_directory_is_openbuild_not_the_upstream_one() {
+        let home = fixture("split-home");
+        let resolved = effective_config_dir_from(None, Some(home.clone().into_os_string()), None)
+            .expect("home resolves");
+        assert_eq!(resolved.file_name().and_then(|name| name.to_str()), Some("openbuild"));
+        // Resolving must not depend on the directory existing: the old code
+        // only switched when the user had created it by hand.
+        assert!(!resolved.exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn migration_moves_only_openbuild_owned_files() {
+        let root = fixture("migrate");
+        let legacy = root.join("legacy");
+        let target = root.join("target");
+        fs::create_dir_all(legacy.join("plugin")).expect("legacy tree");
+        fs::write(legacy.join("openbuild.json"), "{\"providers\":{}}").expect("providers");
+        fs::write(legacy.join("uncensored.json"), "{\"options\":{}}").expect("options");
+        fs::write(legacy.join("opencode.jsonc"), "// upstream").expect("upstream file");
+        fs::write(legacy.join("plugin").join(UNCENSORED_PLUGIN_FILE), SOURCE).expect("plugin");
+        // Someone else's plugin in the shared directory must not move with ours.
+        fs::write(legacy.join("plugin").join("someone-else.ts"), "// theirs").expect("foreign plugin");
+
+        let outcome = migrate_legacy_config_dir_from(&legacy, &target);
+
+        assert!(target.join("openbuild.json").is_file(), "providers moved");
+        assert!(target.join("uncensored.json").is_file(), "options moved");
+        assert!(
+            target.join("plugin").join(UNCENSORED_PLUGIN_FILE).is_file(),
+            "managed plugin moved"
+        );
+        assert!(
+            legacy.join("opencode.jsonc").is_file(),
+            "an upstream file must stay where it is"
+        );
+        assert!(
+            legacy.join("plugin").join("someone-else.ts").is_file(),
+            "a foreign plugin must stay where it is"
+        );
+        assert!(
+            !target.join("plugin").join("someone-else.ts").exists(),
+            "a foreign plugin must not be dragged along"
+        );
+        assert_eq!(outcome.moved.len(), 3);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_never_piles_onto_a_configured_directory() {
+        let root = fixture("migrate-twice");
+        let legacy = root.join("legacy");
+        let target = root.join("target");
+        fs::create_dir_all(&legacy).expect("legacy tree");
+        fs::write(legacy.join("openbuild.json"), "old").expect("old providers");
+        fs::create_dir_all(&target).expect("target tree");
+        fs::write(target.join("openbuild.json"), "new").expect("new providers");
+
+        let outcome = migrate_legacy_config_dir_from(&legacy, &target);
+
+        assert!(outcome.is_noop());
+        assert_eq!(
+            fs::read_to_string(target.join("openbuild.json")).expect("read"),
+            "new",
+            "the already-configured file wins"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::theme::Theme;
 use openbuild_backend::providers::{
-    ANTHROPIC_COMPATIBLE_PACKAGE, OPENAI_COMPATIBLE_PACKAGE, ProviderDraft,
+    ANTHROPIC_COMPATIBLE_PACKAGE, EFFORT_LEVELS, OPENAI_COMPATIBLE_PACKAGE, ProviderDraft,
 };
 
 /// Validated result of a finished wizard.
@@ -54,11 +54,12 @@ enum Field {
     Context,
     Output,
     Package,
+    ReasoningEffort,
     DefaultModel,
     Save,
 }
 
-const FIELDS: [Field; 11] = [
+const FIELDS: [Field; 12] = [
     Field::Id,
     Field::Name,
     Field::BaseUrl,
@@ -68,9 +69,33 @@ const FIELDS: [Field; 11] = [
     Field::Context,
     Field::Output,
     Field::Package,
+    Field::ReasoningEffort,
     Field::DefaultModel,
     Field::Save,
 ];
+
+/// The empty first entry means "do not configure one": the provider default
+/// applies. Everything after it comes from [`EFFORT_LEVELS`], the list that is
+/// also written to the config, so the picker can never offer a level the saved
+/// capability omits.
+const UNSET_EFFORT_CHOICE: &str = "";
+const EFFORT_CHOICE_COUNT: usize = EFFORT_LEVELS.len() + 1;
+
+/// The level at `index`, or `None` when the index is past the end.
+fn effort_choice_at(index: usize) -> Option<&'static str> {
+    if index == 0 {
+        return Some(UNSET_EFFORT_CHOICE);
+    }
+    EFFORT_LEVELS.get(index - 1).copied()
+}
+
+/// The index of `level` in the picker, or the "unset" row when unknown.
+fn effort_choice_index(level: &str) -> usize {
+    EFFORT_LEVELS
+        .iter()
+        .position(|candidate| *candidate == level)
+        .map_or(0, |index| index + 1)
+}
 
 /// State of the provider setup wizard.
 pub struct ProviderSetupState {
@@ -84,6 +109,8 @@ pub struct ProviderSetupState {
     output: LineEditor,
     use_anthropic_package: bool,
     make_default: bool,
+    /// Index into the picker; 0 leaves the provider default alone.
+    effort_choice: usize,
     focus: usize,
     /// Validation error shown under the form; cleared on the next edit.
     error: Option<String>,
@@ -112,6 +139,7 @@ impl ProviderSetupState {
             output,
             use_anthropic_package: false,
             make_default: true,
+            effort_choice: 0,
             focus: 0,
             error: None,
         }
@@ -130,6 +158,11 @@ impl ProviderSetupState {
         state.context.set_text(draft.context.to_string());
         state.output.set_text(draft.output.to_string());
         state.use_anthropic_package = draft.package == ANTHROPIC_COMPATIBLE_PACKAGE;
+        state.effort_choice = draft
+            .reasoning_effort
+            .as_deref()
+            .map(effort_choice_index)
+            .unwrap_or(0);
         state.make_default = make_default;
         state
     }
@@ -144,7 +177,7 @@ impl ProviderSetupState {
             Field::ModelName => &self.model_name,
             Field::Context => &self.context,
             Field::Output => &self.output,
-            Field::Package | Field::DefaultModel | Field::Save => &self.id,
+            Field::Package | Field::ReasoningEffort | Field::DefaultModel | Field::Save => &self.id,
         }
     }
 
@@ -158,7 +191,7 @@ impl ProviderSetupState {
             Field::ModelName => &mut self.model_name,
             Field::Context => &mut self.context,
             Field::Output => &mut self.output,
-            Field::Package | Field::DefaultModel | Field::Save => return None,
+            Field::Package | Field::ReasoningEffort | Field::DefaultModel | Field::Save => return None,
         })
     }
 
@@ -197,9 +230,24 @@ impl ProviderSetupState {
             model_name: self.model_name.text().to_string(),
             context: self.context.text().trim().parse().unwrap_or(0),
             output: self.output.text().trim().parse().unwrap_or(0),
+            reasoning_effort: self.reasoning_effort().map(str::to_string),
         };
         draft.normalize();
         draft
+    }
+
+    /// The selected level, or `None` for "provider default".
+    fn reasoning_effort(&self) -> Option<&'static str> {
+        effort_choice_at(self.effort_choice).filter(|choice| !choice.is_empty())
+    }
+
+    fn cycle_effort(&mut self, forward: bool) {
+        self.effort_choice = if forward {
+            (self.effort_choice + 1) % EFFORT_CHOICE_COUNT
+        } else {
+            (self.effort_choice + EFFORT_CHOICE_COUNT - 1) % EFFORT_CHOICE_COUNT
+        };
+        self.error = None;
     }
 
     fn submit(&mut self) -> ProviderSetupOutcome {
@@ -268,6 +316,19 @@ impl ProviderSetupState {
                 KeyCode::Up => self.move_focus(-1),
                 _ => ProviderSetupOutcome::Unchanged,
             },
+            Field::ReasoningEffort => match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.cycle_effort(false);
+                    ProviderSetupOutcome::Changed
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    self.cycle_effort(true);
+                    ProviderSetupOutcome::Changed
+                }
+                KeyCode::Down => self.move_focus(1),
+                KeyCode::Up => self.move_focus(-1),
+                _ => ProviderSetupOutcome::Unchanged,
+            },
             Field::Save => match key.code {
                 KeyCode::Down => self.move_focus(1),
                 KeyCode::Up => self.move_focus(-1),
@@ -311,7 +372,7 @@ impl ProviderSetupState {
 }
 
 const DIALOG_WIDTH: u16 = 78;
-const DIALOG_HEIGHT: u16 = 20;
+const DIALOG_HEIGHT: u16 = 22;
 const INNER_PAD: u16 = 2;
 
 /// Render the provider setup wizard centered in `area`.
@@ -471,6 +532,36 @@ pub fn render_provider_setup(area: Rect, buf: &mut Buffer, state: &ProviderSetup
             ),
         ]);
         options.render(Rect::new(inner_x, row, inner_width, 1), buf);
+        row += 1;
+    }
+
+    // Reasoning-effort row
+    if row < bottom {
+        let focused = state.focused_field() == Field::ReasoningEffort;
+        let current = state
+            .reasoning_effort()
+            .unwrap_or("provider default (unset)");
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{:<LABEL_WIDTH$}", "Thinking effort"),
+                Style::default().fg(if focused {
+                    theme.accent_user
+                } else {
+                    theme.gray_bright
+                }),
+            ),
+            Span::styled(
+                format!("◄ {current} ►"),
+                Style::default()
+                    .fg(if focused {
+                        theme.accent_user
+                    } else {
+                        theme.text_primary
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        line.render(Rect::new(inner_x, row, inner_width, 1), buf);
         row += 1;
     }
 
@@ -736,11 +827,31 @@ mod tests {
             model_name: "Claude X".to_string(),
             context: 200_000,
             output: 8_192,
+            reasoning_effort: Some("high".to_string()),
         };
         let state = ProviderSetupState::prefilled(&draft, false);
         assert_eq!(state.draft(), draft);
         assert!(state.use_anthropic_package);
         assert!(!state.make_default);
+    }
+
+    #[test]
+    fn the_effort_row_cycles_and_starts_unset() {
+        let mut state = filled();
+        assert!(state.draft().reasoning_effort.is_none(), "unset by default");
+
+        // Focus lands on the effort row by walking to it explicitly.
+        while state.focused_field() != Field::ReasoningEffort {
+            state.handle_key(&key(KeyCode::Tab));
+        }
+        state.handle_key(&key(KeyCode::Right));
+        assert_eq!(state.draft().reasoning_effort.as_deref(), Some("none"));
+        state.handle_key(&key(KeyCode::Right));
+        assert_eq!(state.draft().reasoning_effort.as_deref(), Some("minimal"));
+        state.handle_key(&key(KeyCode::Left));
+        assert_eq!(state.draft().reasoning_effort.as_deref(), Some("none"));
+        state.handle_key(&key(KeyCode::Left));
+        assert!(state.draft().reasoning_effort.is_none(), "wraps back to unset");
     }
 
     #[test]

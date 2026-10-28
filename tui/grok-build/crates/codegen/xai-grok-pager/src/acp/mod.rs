@@ -272,6 +272,23 @@ async fn connect_opencode(
     let auth_manager =
         spawn::boot_auth_manager(&xai_grok_shell::util::grok_home::grok_home(), &agent_config);
 
+    // Split OpenBuild's configuration out of the upstream `opencode` directory
+    // before anything reads it: providers, `/uncensored` options and the managed
+    // plugin all live under this directory now. The move only happens once,
+    // while the destination is still empty.
+    let migration = openbuild_backend::plugin::migrate_legacy_config_dir();
+    if !migration.is_noop() {
+        tracing::info!(
+            target = migration
+                .target
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            moved = migration.moved.len(),
+            "moved the OpenBuild config out of the upstream opencode directory"
+        );
+    }
+
     // The managed `/uncensored` plugin must exist before the kernel starts so
     // its agent is in the first ACP catalog. A failure here is reported and
     // does not block the normal build agent.

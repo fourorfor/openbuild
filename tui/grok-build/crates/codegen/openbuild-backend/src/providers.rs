@@ -36,6 +36,10 @@ pub const MANAGED_FILE: &str = "openbuild.json";
 /// The only file that can shadow our `model` default.
 const SHADOWING_FILE: &str = "openbuild.jsonc";
 
+/// The reasoning-effort levels a model may advertise. The provider decides
+/// which of them it accepts; an unknown one is rejected by `/effort`.
+pub const EFFORT_LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /// Default context window when the user leaves the field empty.
 pub const DEFAULT_CONTEXT: u64 = 128_000;
 /// Default output limit when the user leaves the field empty.
@@ -63,6 +67,9 @@ pub struct ProviderDraft {
     pub context: u64,
     /// Maximum output tokens.
     pub output: u64,
+    /// Reasoning effort written as the model's `settings.reasoningEffort`.
+    /// `None` leaves the provider's own default in place.
+    pub reasoning_effort: Option<String>,
 }
 
 impl ProviderDraft {
@@ -78,6 +85,7 @@ impl ProviderDraft {
             model_name: String::new(),
             context: DEFAULT_CONTEXT,
             output: DEFAULT_OUTPUT,
+            reasoning_effort: None,
         }
     }
 
@@ -164,6 +172,25 @@ impl ProviderDraft {
             "limit".to_string(),
             json!({ "context": self.context, "output": self.output }),
         );
+        if let Some(effort) = self.reasoning_effort.as_ref() {
+            // Verified against a real kernel: a model-level `reasoningEffort`
+            // reaches the request body as `reasoning_effort`, and declaring the
+            // capability is what makes the kernel advertise an `effort` config
+            // option (and therefore `/effort`) for this model.
+            model.insert(
+                "settings".to_string(),
+                json!({ "reasoningEffort": effort }),
+            );
+            model.insert(
+                "capabilities".to_string(),
+                json!({
+                    "reasoning": {
+                        "supported": true,
+                        "effort": EFFORT_LEVELS,
+                    }
+                }),
+            );
+        }
         let mut models = Map::new();
         models.insert(self.model_id.clone(), Value::Object(model));
 
@@ -571,6 +598,7 @@ mod tests {
             model_name: "GPT OSS 120B".to_string(),
             context: 131072,
             output: 8192,
+            reasoning_effort: None,
         }
     }
 
@@ -628,6 +656,36 @@ mod tests {
                 .get("apiKey")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn reasoning_effort_is_written_and_advertised() {
+        let dir = TempDir::new("providers-effort");
+        let mut d = draft();
+        d.reasoning_effort = Some("high".to_string());
+        save_provider_in(dir.path(), &d, false).unwrap();
+        let value = read_json(&managed_path(dir.path())).unwrap();
+        let model = &value["providers"]["gateway"]["models"]["gpt-oss-120b"];
+        // The request-body key the kernel forwards.
+        assert_eq!(model["settings"]["reasoningEffort"], "high");
+        // The capability that makes the kernel advertise an effort option.
+        assert_eq!(model["capabilities"]["reasoning"]["supported"], true);
+        assert!(
+            model["capabilities"]["reasoning"]["effort"]
+                .as_array()
+                .expect("effort list")
+                .contains(&Value::String("high".to_string()))
+        );
+    }
+
+    #[test]
+    fn leaving_effort_unset_writes_no_reasoning_keys() {
+        let dir = TempDir::new("providers-noeffort");
+        save_provider_in(dir.path(), &draft(), false).unwrap();
+        let value = read_json(&managed_path(dir.path())).unwrap();
+        let model = &value["providers"]["gateway"]["models"]["gpt-oss-120b"];
+        assert!(model.get("settings").is_none());
+        assert!(model.get("capabilities").is_none());
     }
 
     #[test]

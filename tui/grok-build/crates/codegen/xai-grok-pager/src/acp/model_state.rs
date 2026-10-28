@@ -224,8 +224,11 @@ impl ModelState {
     }
 
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
-    /// `parse_reasoning_efforts_meta` returns `None` when the list is absent, not an array, or present but unusable.
-    /// All of those fall back to the built-in menu, exactly as the shell's session picker does.
+    ///
+    /// Two vendor shapes advertise effort, and both mean the same thing:
+    /// `supportsReasoningEffort: true` (a flag plus an optional list) and a bare
+    /// `reasoningEfforts` list. The ACP kernel only emits the list, so requiring
+    /// the flag hid every effort level for OpenBuild models.
     pub(crate) fn reasoning_effort_options_for(
         &self,
         id: &acp::ModelId,
@@ -233,10 +236,15 @@ impl ModelState {
         let Some(info) = self.available.get(id) else {
             return Vec::new();
         };
-        if !supports_reasoning_effort_meta(info.meta.as_ref()) {
+        let meta = info.meta.as_ref();
+        let listed = parse_reasoning_efforts_meta(meta);
+        if listed.is_some() {
+            return listed.unwrap_or_else(legacy_effort_options);
+        }
+        if !supports_reasoning_effort_meta(meta) {
             return Vec::new();
         }
-        parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_else(legacy_effort_options)
+        legacy_effort_options()
     }
 
     /// The effort row the pickers highlight when the menu for `id` opens. `None` leaves the cursor on the first row.
@@ -303,21 +311,19 @@ impl ModelState {
         token: &str,
         resolved: Option<ReasoningEffort>,
     ) -> Result<ReasoningEffort, EffortTokenError> {
-        let supports = self
-            .available
-            .get(id)
-            .map(|info| supports_reasoning_effort_meta(info.meta.as_ref()))
-            .unwrap_or(false);
-        if !supports {
+        // "Supported" must mean "the menu is non-empty", so this agrees with
+        // `/effort`'s argument picker for both vendor metadata shapes.
+        let offered: Vec<String> = self
+            .reasoning_effort_options_for(id)
+            .into_iter()
+            .map(|opt| opt.id)
+            .collect();
+        if offered.is_empty() {
             return Err(EffortTokenError::Unsupported);
         }
         resolved.ok_or_else(|| EffortTokenError::UnknownToken {
             token: token.to_string(),
-            offered: self
-                .reasoning_effort_options_for(id)
-                .into_iter()
-                .map(|opt| opt.id)
-                .collect(),
+            offered,
         })
     }
 
@@ -522,11 +528,46 @@ mod tests {
     fn reasoning_effort_options_gate_first_empty_when_unsupported() {
         // A default state has no current model, so no menu
         assert!(ModelState::default().reasoning_effort_options().is_empty());
-        // A model that does not support effort gets no menu, even with a list present
+        // A model that advertises nothing gets no menu
+        let state = state_with_meta(Some(serde_json::json!({})));
+        assert!(state.reasoning_effort_options().is_empty());
+    }
+
+    #[test]
+    fn reasoning_effort_options_accept_the_kernel_list_without_the_flag() {
+        // The ACP kernel emits `reasoningEfforts` and no `supportsReasoningEffort`
+        // flag. Requiring the flag hid every level for OpenBuild models.
+        let state = state_with_meta(Some(serde_json::json!({
+            "reasoningEfforts": [
+                { "value": "low", "label": "low" },
+                { "value": "high", "label": "high" },
+            ],
+        })));
+        let ids: Vec<_> = state
+            .reasoning_effort_options()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        assert_eq!(ids, ["low", "high"]);
+    }
+
+    #[test]
+    fn an_unadvertised_effort_is_rejected_as_unsupported() {
+        let state = state_with_meta(Some(serde_json::json!({})));
+        let id = state.current.clone().expect("current model");
+        assert_eq!(
+            state.resolve_effort_for_model(&id, "high"),
+            Err(EffortTokenError::Unsupported)
+        );
+        // The same model with the kernel list resolves normally.
         let state = state_with_meta(Some(serde_json::json!({
             "reasoningEfforts": [{ "value": "high" }],
         })));
-        assert!(state.reasoning_effort_options().is_empty());
+        let id = state.current.clone().expect("current model");
+        assert_eq!(
+            state.resolve_effort_for_model(&id, "high"),
+            Ok(ReasoningEffort::High)
+        );
     }
 
     #[test]

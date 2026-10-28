@@ -78,7 +78,9 @@ pub fn default_spec(kernel_path: Option<PathBuf>) -> Option<SpawnSpec> {
 ///
 /// The kernel hard-codes its app name (`opencode`), so by default it reads
 /// `~/.config/opencode`. OpenBuild keeps its configuration under its own name,
-/// so when the user has created `~/.config/openbuild` we point the kernel there.
+/// so the kernel is always pointed at `~/.config/openbuild` (or the XDG base
+/// when one is set), and the directory is created so the kernel can write its
+/// state files there.
 ///
 /// `OPENCODE_CONFIG_DIR` always wins: when it is set we add nothing, leaving
 /// the kernel's own resolution untouched.
@@ -86,6 +88,7 @@ pub fn resolve_config_dir() -> Option<PathBuf> {
     config_dir_override(
         std::env::var_os("OPENCODE_CONFIG_DIR"),
         std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")),
+        std::env::var_os("XDG_CONFIG_HOME"),
     )
 }
 
@@ -93,12 +96,21 @@ pub fn resolve_config_dir() -> Option<PathBuf> {
 fn config_dir_override(
     explicit: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
-    if explicit.is_some() {
+    if explicit.is_some_and(|value| !value.is_empty()) {
         return None;
     }
-    let candidate = PathBuf::from(home?).join(".config").join("openbuild");
-    candidate.is_dir().then_some(candidate)
+    let base = match xdg.filter(|value| !value.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(home?).join(".config"),
+    };
+    let candidate = base.join("openbuild");
+    // Create it: the kernel resolves `plugin/` and its state files relative to
+    // this path, and an existing upstream `~/.config/opencode` must not be the
+    // fallback.
+    std::fs::create_dir_all(&candidate).ok()?;
+    Some(candidate)
 }
 
 #[cfg(test)]
@@ -127,23 +139,41 @@ mod tests {
         let resolved = config_dir_override(
             Some("C:\\elsewhere".into()),
             Some(home.clone().into_os_string()),
+            None,
         );
         assert_eq!(resolved, None, "OPENCODE_CONFIG_DIR must not be overridden");
     }
 
     #[test]
-    fn config_dir_override_ignores_a_missing_directory() {
-        let home = std::env::temp_dir().join("openbuild-config-dir-absent");
+    fn config_dir_override_creates_the_openbuild_directory() {
+        let home = std::env::temp_dir().join(format!(
+            "openbuild-config-dir-create-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("create fixture");
-        assert_eq!(config_dir_override(None, Some(home.into_os_string())), None);
+        let resolved = config_dir_override(None, Some(home.clone().into_os_string()), None);
+        let expected = home.join(".config").join("openbuild");
+        assert_eq!(resolved, Some(expected.clone()));
+        assert!(expected.is_dir(), "the kernel needs the directory to exist");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
-    fn config_dir_override_picks_up_an_existing_directory() {
-        let home = std::env::temp_dir().join("openbuild-config-dir-present");
-        std::fs::create_dir_all(home.join(".config").join("openbuild")).expect("create fixture");
-        let resolved = config_dir_override(None, Some(home.clone().into_os_string()));
-        assert_eq!(resolved, Some(home.join(".config").join("openbuild")));
+    fn config_dir_override_honours_xdg() {
+        let home = std::env::temp_dir().join(format!(
+            "openbuild-config-dir-xdg-{}",
+            std::process::id()
+        ));
+        let xdg = home.join("xdg");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create fixture");
+        let resolved = config_dir_override(
+            None,
+            Some(home.clone().into_os_string()),
+            Some(xdg.clone().into_os_string()),
+        );
+        assert_eq!(resolved, Some(xdg.join("openbuild")));
+        let _ = std::fs::remove_dir_all(home);
     }
 }
