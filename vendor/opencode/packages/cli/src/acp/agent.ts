@@ -17,6 +17,7 @@ import { ACPClient } from "./client"
 import { ACPConnection } from "./connection"
 import { ACPError } from "./error"
 import { ACPService } from "./service"
+import { ACPSessionExt } from "./session-ext"
 import { ACPSessions } from "./sessions"
 import { ACPTurn } from "./turn"
 
@@ -121,6 +122,23 @@ export const connect = Effect.fnUntraced(function* (
     "session/cancel",
     handle((service, ctx) => service.cancel(ctx.params)),
   )
+  // The grok-derived TUI asks for session history and a context breakdown
+  // through `x.ai/*`. ACP types no custom methods, so each one declares its
+  // own params parser; `handle` still gives them the same error mapping.
+  //
+  // The Rust ACP client encodes every custom method with a leading `_`
+  // (`_x.ai/session/list`) and strips it again when decoding replies; this
+  // SDK dispatches on the literal method name, so both spellings must be
+  // registered or the TUI's `/resume` and `/context` see method-not-found.
+  const ext = ACPSessionExt.make({ client })
+  const listHandler = handle((_service, ctx: HandlerContext<ACPSessionExt.ListRequest>) => ext.list(ctx.params))
+  const infoHandler = handle((_service, ctx: HandlerContext<ACPSessionExt.InfoRequest>) => ext.info(ctx.params))
+  for (const method of ["x.ai/session/list", "_x.ai/session/list"]) {
+    app.onRequest(method, { parse: ACPSessionExt.parseListParams }, listHandler(spanName(method)))
+  }
+  for (const method of ["x.ai/session/info", "_x.ai/session/info"]) {
+    app.onRequest(method, { parse: ACPSessionExt.parseInfoParams }, infoHandler(spanName(method)))
+  }
   const acp = ACPConnection.make(app, stream)
   const connection = acp.connection
   const sessions = yield* ACPSessions.make({ client, connection, catalog })

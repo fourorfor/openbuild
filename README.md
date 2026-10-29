@@ -72,13 +72,13 @@ openbuild/
 ├── run.ps1                # 启动 TUI（自动指向 dist 内核）
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
 ├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
-├── patches/               # 两个上游仓库的完整改动（15 个补丁，可复现）
+├── patches/               # 两个上游仓库的完整改动（18 个补丁，可复现）
 ├── tests/                 # H 无审查插件的 Bun 单测
 ├── vendor/opencode/       # 内核源码 @ b2526211ec
 └── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
 ```
 
-`patches/` 里是 15 个按主题拆分的补丁（内核 5 个 + TUI 10 个），
+`patches/` 里是 18 个按主题拆分的补丁（内核 7 个 + TUI 11 个），
 应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始

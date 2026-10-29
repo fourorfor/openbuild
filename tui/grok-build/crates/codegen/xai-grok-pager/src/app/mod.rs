@@ -27,11 +27,16 @@ pub mod edit_highlight_worker;
 /// Off-thread Mermaid diagram render worker (out of process) + per-session cache.
 pub mod mermaid_worker;
 pub(crate) mod prompt_ack;
-pub(crate) fn is_daemon_session_row(_source: &str) -> bool {
-    false
+pub(crate) const OPENBUILD_SESSION_SOURCE: &str = "opencode";
+/// Sessions served by the embedded OpenBuild kernel live in that kernel's store,
+/// not under the grok session directory, so the local-store lookup can never
+/// resolve them. Treating them like daemon rows gives them the one routing they
+/// need: straight to ACP `session/load` with the row's own cwd.
+pub(crate) fn is_daemon_session_row(source: &str) -> bool {
+    source == OPENBUILD_SESSION_SOURCE
 }
-pub(crate) fn is_daemon_or_remote_control_row(_source: &str) -> bool {
-    false
+pub(crate) fn is_daemon_or_remote_control_row(source: &str) -> bool {
+    is_daemon_session_row(source)
 }
 pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
