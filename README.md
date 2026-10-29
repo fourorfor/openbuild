@@ -12,7 +12,7 @@ openbuild-kernel.exe (Bun)
 OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 
-本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连；H 无审查模式 v1.1 已落地。
+本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连；**E2 双内核并排（`/pane`）已落地**；H 无审查模式 v1.1 已落地。
 
 ## 当前状态
 
@@ -21,7 +21,10 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 - `openbuild-kernel.exe acp` 能响应 `initialize`，返回 `agentCapabilities`、9 个可用模型、3 个命令。
 - `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）；安装 H 插件后 mode 为 `build` / `plan` / `uncensored`。
 - Rust 侧子进程桥 `openbuild-backend` 能完成 `initialize → session/new` 往返。
-- `cargo test -p openbuild-backend`：71 个单测全部通过（含子智能体、HTTP feed 与 H 插件安装器/配置）。
+- `cargo test -p openbuild-backend --lib`：113 passed / 2 ignored（含子智能体、HTTP feed、H 插件安装器与 E2 的 profile 槽位/隔离目录）。
+- 真实双内核（ptyctl）：`/pane open secondary` 后两个内核进程并存、两 pane 并排、左右各自返回
+  `FINAL-LEFT` / `FINAL-RIGHT`、`/backend` 按 pane 报 slot 0/1、secondary 拥有私有 `opencode.db`、
+  杀掉 secondary 只影响该 pane。
 - H 插件 Bun 单测：8 pass；真实内核 `plugin check` 对 managed 插件返回 `openbuild.uncensored (current)`，对坏插件返回 `check failed` 且 exit 1。
 - `cargo check -p xai-grok-pager`：通过；`/uncensored` 相关 lib 单测 9 pass。
 - `cargo build -p openbuild-server --release`：通过；`openbuild-server --version` → `openbuild-server 0.1.0`。
@@ -72,13 +75,13 @@ openbuild/
 ├── run.ps1                # 启动 TUI（自动指向 dist 内核）
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
 ├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
-├── patches/               # 两个上游仓库的完整改动（18 个补丁，可复现）
+├── patches/               # 两个上游仓库的完整改动（19 个补丁，可复现）
 ├── tests/                 # H 无审查插件的 Bun 单测
 ├── vendor/opencode/       # 内核源码 @ b2526211ec
 └── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
 ```
 
-`patches/` 里是 18 个按主题拆分的补丁（内核 7 个 + TUI 11 个），
+`patches/` 里是 19 个按主题拆分的补丁（内核 7 个 + TUI 12 个），
 应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始
@@ -161,6 +164,7 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 | `OPENBUILD_KERNEL` | 内核可执行文件路径 |
 | `OPENBUILD_PROMPT` | 仅 handshake 示例使用：发送一轮 prompt |
 | `OPENBUILD_THEME_DIR` | 覆盖导入主题的存放目录（默认 `~/.grok/themes`） |
+| `OPENBUILD_PROFILE_ROOT` | `/pane` 各 profile 的私有根目录（默认 `~/.openbuild/profiles/<label>`） |
 | `OPENBUILD_HTTP_FEED` | 设为 `0` / `off` 可关闭只读 HTTP 事件侧通道（默认开启） |
 | `PROTOC` | 构建期 protoc 路径（Windows 必需） |
 | `OPENCODE_VERSION` | 构建内核时覆盖版本号（本仓库使用 `2.1.4`，避免 detached 版本触发 free-tier 门槛） |
@@ -180,6 +184,33 @@ HTTP feed: connected (128 events, 0 dropped, 0 reconnects, last: session.diff)
 它连接的是 ACP 内核正在使用的那个 `serve` 进程，只读订阅 `/api/event`，
 用来补上 ACP 不携带的 `session.tool.progress`、`session.diff` 与完整 usage。
 连接失败只会让这行显示 `stopped` / `reconnecting`，不影响对话主链路。
+
+## 双内核并排（`/pane`）
+
+`/pane open <label>` 会在同一个 TUI 里再拉起一个内核，两个 pane 左右并排，
+各自拥有独立的 transcript、composer 和会话数据库：
+
+```text
+/profiles/<label>/
+├── config/               # OPENCODE_CONFIG_DIR
+├── share/opencode/       # XDG_DATA_HOME —— 自己的 opencode.db
+├── state/                # XDG_STATE_HOME
+└── cache/                # XDG_CACHE_HOME
+```
+
+一个 profile 是**后端 + 模型 + 工作区**的完整组合；三者任一不同就是不同 profile。
+第二个 pane 默认跑在同一工作区，用私有 `OPENBUILD_PROFILE_ROOT` 隔离存储。
+
+| 命令 | 作用 |
+| --- | --- |
+| `/pane` 或 `/pane list` | 列出每个连接槽位的 profile、模型与焦点，并说明当前布局 |
+| `/pane open [label]` | 打开第二个 pane（label 只允许字母、数字、`-`、`_`） |
+| `/pane focus [left\|right\|next]` | 切换键盘焦点；也可以直接点击 pane |
+| `/pane close [label]` | 关闭指定的 secondary pane（不带 label 时关唯一的 secondary） |
+
+`/backend` 跟随焦点 pane：左 pane 报 primary（含 HTTP feed），右 pane 报
+`Pane: slot 1 · profile independent storage`。两个内核互不影响 ——
+杀掉一个只会让那一个 pane 显示 `This pane's kernel stopped`，另一个仍可继续工作。
 
 ## 作为 ACP 服务端使用（Zed / Neovim）
 
@@ -405,7 +436,7 @@ OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍
 以下功能已有设计但**尚未落地**，不要按已交付能力使用：
 
 - **G 的 UI 消费**：`session.diff` 的 diff 视图与完整 usage 的用量面板。
-- **E 多 profile 并行**：与「一个 TUI 只连一个内核」的当前约束冲突，需先做范围决策。
+- **E 的后续打磨**：分割比例快捷键、按 profile 固定初始模型、支持多于两个 pane。E2 双内核本身已交付（`/pane`）。
 - **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v1.1 的其余项已完成。
 
 完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)。

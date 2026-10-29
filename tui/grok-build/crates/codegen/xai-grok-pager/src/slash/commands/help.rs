@@ -49,6 +49,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Minimal,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         assert!(matches!(

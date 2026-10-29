@@ -17,12 +17,45 @@ impl SlashCommand for BackendCommand {
         usage: "/backend",
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if !args.trim().is_empty() {
             return CommandResult::Error("/backend takes no arguments.".to_string());
         }
-        CommandResult::Message(report())
+        match ctx.pane_connection.and_then(report_for_slot) {
+            Some(report) => CommandResult::Message(report),
+            None => CommandResult::Message(report()),
+        }
     }
+}
+
+/// Report one connection slot's backend, for `/backend` on a pane.
+///
+/// The primary slot keeps the process-wide report (it also carries the proxy and
+/// feed lines, which are process-wide facts); a secondary slot answers for its
+/// own kernel so switching panes changes what `/backend` says.
+pub fn report_for_slot(slot: crate::app::connections::ConnectionId) -> Option<String> {
+    if slot == crate::app::connections::ConnectionId::PRIMARY {
+        return Some(report());
+    }
+    let profile = openbuild_backend::profile::active_in(slot.0)?;
+    let mut lines = Vec::new();
+    lines.push(format!("Backend: {}", describe_kind(&profile)));
+    if let Some(path) = profile.kernel_path.as_ref() {
+        lines.push(format!("Kernel: {}", path.display()));
+    }
+    lines.push(format!("Capabilities: {}", describe_capabilities(&profile)));
+    lines.push(format!(
+        "Pane: slot {} · profile {}",
+        slot.0,
+        openbuild_backend::spawn::profile_root("")
+            .map(|_| "independent storage")
+            .unwrap_or("shared storage")
+    ));
+    lines.push(format!(
+        "Proxy: {}",
+        openbuild_backend::proxy::describe(openbuild_backend::spawn::active_proxy())
+    ));
+    Some(lines.join("\n"))
 }
 
 /// Build the user-visible report.
@@ -41,11 +74,11 @@ pub fn report() -> String {
     };
 
     let mut lines = Vec::new();
-    lines.push(format!("Backend: {}", describe_kind(profile)));
+    lines.push(format!("Backend: {}", describe_kind(&profile)));
     if let Some(path) = profile.kernel_path.as_ref() {
         lines.push(format!("Kernel: {}", path.display()));
     }
-    lines.push(format!("Capabilities: {}", describe_capabilities(profile)));
+    lines.push(format!("Capabilities: {}", describe_capabilities(&profile)));
     lines.push(format!(
         "Proxy: {}",
         openbuild_backend::proxy::describe(openbuild_backend::spawn::active_proxy())

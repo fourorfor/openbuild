@@ -85,7 +85,7 @@ impl BackendProfile {
         Self::for_kind(BackendKind::OpenCode, kernel_path)
     }
 
-    fn for_kind(kind: BackendKind, kernel_path: Option<PathBuf>) -> Self {
+    pub(crate) fn for_kind(kind: BackendKind, kernel_path: Option<PathBuf>) -> Self {
         let mut caps = Capabilities::default();
         if kind == BackendKind::GrokShell {
             caps.ext_queue = true;
@@ -164,32 +164,103 @@ impl BackendProfile {
     }
 }
 
-static ACTIVE: OnceLock<BackendProfile> = OnceLock::new();
-static ACTIVE_KIND: OnceLock<BackendKind> = OnceLock::new();
+/// How many concurrent connections the TUI can hold.
+///
+/// One is the historical single-kernel mode; two is the multi-profile
+/// (`/pane`) mode. The number only bounds the registry — a slot that was never
+/// written reads as `None`, so a 1-connection run keeps today's behaviour.
+pub const MAX_CONNECTIONS: usize = 4;
+
+/// Per-connection profile slots.
+///
+/// Slot 0 is the process-wide profile the single-connection code paths read.
+/// Every connection also publishes its own slot so `/backend` and the login
+/// wizard can answer for *their* kernel instead of whichever one connected
+/// first. A `OnceLock` per slot keeps the original "first writer wins"
+/// semantics, which is what makes a stale capability snapshot impossible.
+static SLOTS: [OnceLock<BackendProfile>; MAX_CONNECTIONS] = [
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+];
+
+/// Backend kind per slot, recorded before `initialize` so client capabilities
+/// can be shaped. Kept apart from [`SLOTS`]: recording the kind must not claim
+/// the profile slot, or the initialize response that follows would be ignored.
+static KINDS: [std::sync::atomic::AtomicU8; MAX_CONNECTIONS] = [
+    std::sync::atomic::AtomicU8::new(KIND_UNSET),
+    std::sync::atomic::AtomicU8::new(KIND_UNSET),
+    std::sync::atomic::AtomicU8::new(KIND_UNSET),
+    std::sync::atomic::AtomicU8::new(KIND_UNSET),
+];
+
+const KIND_UNSET: u8 = u8::MAX;
+const KIND_OPENCODE: u8 = 0;
+const KIND_GROK: u8 = 1;
+
+fn kind_code(kind: BackendKind) -> u8 {
+    match kind {
+        BackendKind::OpenCode => KIND_OPENCODE,
+        BackendKind::GrokShell => KIND_GROK,
+    }
+}
+
+fn slot(index: usize) -> Option<&'static OnceLock<BackendProfile>> {
+    SLOTS.get(index)
+}
+
+/// Record the backend kind for a connection before `initialize` shapes the
+/// client capabilities. The full profile is recorded after the response.
+pub fn set_kind_in(slot_index: usize, kind: BackendKind) {
+    if let Some(cell) = KINDS.get(slot_index) {
+        cell.store(kind_code(kind), std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Record a profile for one connection. Later calls for the same slot are
+/// ignored so the first successful connection owns the capability snapshot.
+pub fn set_active_in(slot_index: usize, profile: BackendProfile) {
+    if let Some(cell) = slot(slot_index) {
+        let _ = cell.set(profile);
+    }
+}
+
+/// The profile of one connection, if that slot has connected.
+pub fn active_in(slot_index: usize) -> Option<BackendProfile> {
+    slot(slot_index).and_then(|cell| cell.get().cloned())
+}
+
+/// Whether one connection is the OpenBuild kernel.
+pub fn is_opencode_in(slot_index: usize) -> bool {
+    let recorded = KINDS
+        .get(slot_index)
+        .map(|cell| cell.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(KIND_UNSET);
+    match recorded {
+        KIND_OPENCODE => true,
+        KIND_GROK => false,
+        _ => active_in(slot_index).map(|profile| profile.kind) == Some(BackendKind::OpenCode),
+    }
+}
 
 /// Record the backend kind before `initialize` (used to shape client
 /// capabilities). The full profile is recorded after the response arrives.
 pub fn set_kind(kind: BackendKind) {
-    let _ = ACTIVE_KIND.set(kind);
+    set_kind_in(0, kind);
 }
 
-/// Record the profile for the process. Later calls are ignored so the first
-/// successful connection owns the capability snapshot.
+/// Record the profile for the primary connection (slot 0).
 pub fn set_active(profile: BackendProfile) {
-    let _ = ACTIVE_KIND.set(profile.kind);
-    let _ = ACTIVE.set(profile);
+    set_active_in(0, profile);
 }
 
-pub fn active() -> Option<&'static BackendProfile> {
-    ACTIVE.get()
+pub fn active() -> Option<BackendProfile> {
+    active_in(0)
 }
 
 pub fn is_opencode() -> bool {
-    ACTIVE_KIND
-        .get()
-        .copied()
-        .or_else(|| ACTIVE.get().map(|profile| profile.kind))
-        == Some(BackendKind::OpenCode)
+    is_opencode_in(0)
 }
 
 #[cfg(test)]
@@ -232,5 +303,49 @@ mod tests {
         assert!(profile.caps.load_session);
         assert!(profile.caps.image_prompt);
         assert!(profile.caps.embedded_context);
+    }
+
+    /// Each connection publishes its own slot, so two kernels cannot overwrite
+    /// each other's capability snapshot and `/backend` can answer per pane.
+    #[test]
+    fn slots_hold_independent_profiles() {
+        assert!(MAX_CONNECTIONS >= 2, "E2 needs at least two connections");
+        // Slots 2/3 are unused by other tests and by the single-connection path.
+        set_kind_in(2, BackendKind::OpenCode);
+        set_active_in(
+            2,
+            BackendProfile::detect(&response(json!({})), Some(PathBuf::from("k2"))),
+        );
+        set_kind_in(3, BackendKind::GrokShell);
+        set_active_in(3, BackendProfile::detect(&response(json!({"grokShell": true})), None));
+
+        assert!(is_opencode_in(2));
+        assert!(!is_opencode_in(3));
+        assert_eq!(
+            active_in(2).and_then(|profile| profile.kernel_path),
+            Some(PathBuf::from("k2"))
+        );
+        assert!(active_in(3).is_some_and(|profile| profile.caps.ext_queue));
+    }
+
+    /// The first writer owns a slot; a late duplicate must not replace it.
+    #[test]
+    fn slot_keeps_the_first_profile() {
+        // Slot 1 is unused by the other slot tests, which keeps parallel test
+        // execution from racing on a shared `OnceLock`.
+        let first = BackendProfile::detect(&response(json!({})), Some(PathBuf::from("first")));
+        set_active_in(1, first);
+        set_active_in(1, BackendProfile::detect(&response(json!({})), None));
+        assert_eq!(
+            active_in(1).and_then(|profile| profile.kernel_path),
+            Some(PathBuf::from("first"))
+        );
+    }
+
+    #[test]
+    fn out_of_range_slots_are_inert() {
+        set_kind_in(MAX_CONNECTIONS, BackendKind::OpenCode);
+        assert!(active_in(MAX_CONNECTIONS).is_none());
+        assert!(!is_opencode_in(MAX_CONNECTIONS));
     }
 }

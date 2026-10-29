@@ -158,6 +158,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         }
     }
@@ -184,6 +186,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         let cmd = ExportCommand;
@@ -206,6 +210,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         let cmd = ExportCommand;

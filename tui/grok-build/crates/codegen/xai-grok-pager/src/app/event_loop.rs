@@ -421,6 +421,61 @@ fn mark_kernel_lost(app: &mut AppView, exit: openbuild_backend::BridgeExit) {
     }
 }
 
+/// Report a secondary pane's kernel loss on that pane only.
+///
+/// The primary pane's death keeps the historical behaviour (`mark_kernel_lost`:
+/// stop every turn, block prompt submission, offer `/reconnect`). A second
+/// kernel is independent, so its death must not freeze the other pane: only the
+/// agents bound to that connection are released and told.
+fn note_secondary_pane_lost(
+    app: &mut AppView,
+    slot: usize,
+    exit: Option<openbuild_backend::BridgeExit>,
+) {
+    let reason = exit.map(|exit| exit.summary());
+    crate::unified_log::error(
+        "kernel.secondary.exited",
+        None,
+        Some(serde_json::json!({
+            "slot": slot,
+            "summary": reason,
+        })),
+    );
+    let affected: Vec<super::agent::AgentId> = app
+        .agents
+        .keys()
+        .copied()
+        .filter(|id| app.connection_of(*id).0 == slot)
+        .collect();
+    for id in affected {
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.session.state = super::agent::AgentState::Idle;
+            agent.running_wake_turn = None;
+            agent.session.current_prompt_id = None;
+            agent.pending_cancel_resend = None;
+            agent.scrollback.finish_all_running();
+            let notice = match reason.as_deref() {
+                Some(reason) => format!(
+                    "This pane's kernel stopped: {reason}.\n\nClose the pane with /pane close, \
+                     then open a fresh one with /pane open."
+                ),
+                None => "This pane's kernel stopped.\n\nClose the pane with /pane close, \
+                         then open a fresh one with /pane open."
+                    .to_string(),
+            };
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(notice));
+        }
+    }
+    if let Some(connection) = app
+        .connections
+        .get_mut(&super::connections::ConnectionId(slot))
+    {
+        connection.alive = false;
+    }
+}
+
 /// Whether a closed ACP receive channel means "the kernel died" rather than
 /// "the app is quitting".
 ///
@@ -1341,6 +1396,193 @@ async fn next_http_feed_event(
     }
 }
 
+/// Pop one merged ACP message without losing a close notice.
+///
+/// A close found while polling is recorded on the mux, so the loop reports the
+/// death on its next pass even when the look-ahead slot consumed the event.
+fn next_acp_message(mux: &mut super::acp_mux::AcpMux) -> Option<AcpClientMessage> {
+    mux.try_next_message().ok()
+}
+
+/// The fatal outcome of one connection's ACP channel closing.
+enum ConnectionClose {
+    /// Report and keep running (recoverable kernel crash).
+    Dead(Option<openbuild_backend::BridgeExit>),
+    /// Exit the loop (deliberate shutdown).
+    Quit,
+}
+
+/// Classify a closed connection by its slot.
+///
+/// Slot 0 is the connection the app started with; its death is the historical
+/// "kernel died" path. A secondary pane's death is reported on its own pane and
+/// does not stop the other pane from working.
+fn classify_connection_close(
+    slot: usize,
+    app: &AppView,
+) -> ConnectionClose {
+    let is_opencode = if slot == 0 {
+        openbuild_backend::profile::is_opencode()
+    } else {
+        openbuild_backend::profile::is_opencode_in(slot)
+    };
+    let exit = if slot == 0 {
+        openbuild_backend::health::exit()
+    } else {
+        openbuild_backend::health::exit_in(slot)
+    };
+    match kernel_exit_on_channel_close(is_opencode, exit) {
+        Some(exit) => ConnectionClose::Dead(Some(exit)),
+        None => {
+            // Nothing recorded yet: a kernel-only close is still reported
+            // (a bridge that died before stamping a status must not be
+            // swallowed). A non-kernel backend closing means shutdown.
+            if is_opencode {
+                ConnectionClose::Dead(None)
+            } else {
+                let _ = app;
+                ConnectionClose::Quit
+            }
+        }
+    }
+}
+
+/// Show a `/pane open` failure.
+fn push_pane_open_failure(app: &mut AppView, message: String) {
+    let target = app.focused_agent();
+    if let Some(agent) = target.and_then(|id| app.agents.get_mut(&id)) {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(message));
+        return;
+    }
+    app.pane_notice = Some(message);
+}
+
+/// The workspace the primary profile was launched for.
+fn app_primary_workspace() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// An in-flight `/pane open`.
+struct PaneOpen {
+    /// Connection slot the new kernel will occupy.
+    connection: super::connections::ConnectionId,
+    /// The profile this pane was requested for (kept across the async spawn so
+    /// the completed connection keeps its label, workspace and storage roots).
+    spec: super::connections::ProfileSpec,
+    rx: tokio::sync::oneshot::Receiver<PaneOpenOutcome>,
+}
+
+/// Result of spawning a pane's kernel and handshaking it.
+struct PaneOpenOutcome {
+    connection: super::connections::ConnectionId,
+    conn: Option<crate::acp::AcpConnection>,
+    error: Option<String>,
+}
+
+/// Start a second kernel for `spec`.
+///
+/// Same discipline as the reconnect path: a dedicated OS thread with its own
+/// current-thread runtime, because the shared connect path holds a runtime and
+/// the subprocess bridge already owns one. The returned receiver carries the
+/// finished connection back to the loop, which is the only owner of the ACP
+/// receivers.
+fn start_pane_open(
+    connect_flags: crate::acp::ConnectFlags,
+    spec: super::connections::ProfileSpec,
+    app: &AppView,
+) -> PaneOpen {
+    let connection = super::connections::ConnectionId(
+        (1..openbuild_backend::profile::MAX_CONNECTIONS)
+            .find(|slot| !app.connections.contains_key(&super::connections::ConnectionId(*slot)))
+            .unwrap_or(1),
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let label = spec.label.clone();
+    let workspace = spec.workspace.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("openbuild-pane-open".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    let _ = done_tx.send(PaneOpenOutcome {
+                        connection,
+                        conn: None,
+                        error: Some(format!("could not build the pane runtime: {e}")),
+                    });
+                    return;
+                }
+            };
+            let launch = openbuild_backend::spawn::profile_launch(&label, Some(workspace));
+            let outcome = runtime.block_on(async {
+                let conn = crate::acp::connect_opencode_slot(
+                    &tokio_util::sync::CancellationToken::new(),
+                    connect_flags,
+                    None,
+                    connection.0,
+                    launch.as_ref(),
+                )
+                .await;
+                match conn {
+                    Ok(conn) => PaneOpenOutcome {
+                        connection,
+                        conn: Some(conn),
+                        error: None,
+                    },
+                    Err(e) => PaneOpenOutcome {
+                        connection,
+                        conn: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            });
+            let _ = done_tx.send(outcome);
+        });
+    if let Err(e) = spawn_result {
+        tracing::error!(error = %e, "could not spawn the pane-open thread");
+    }
+    PaneOpen {
+        connection,
+        spec,
+        rx: done_rx,
+    }
+}
+
+/// Stop one pane: cancel its kernel, drop its agents and its connection slot.
+fn close_pane(app: &mut AppView, connection: super::connections::ConnectionId) {
+    if connection == super::connections::ConnectionId::PRIMARY {
+        app.show_toast("The primary pane cannot be closed.");
+        return;
+    }
+    if let Some(handle) = app.connections.shift_remove(&connection)
+        && let Some(cancel) = handle.cancel
+    {
+        cancel.cancel();
+    }
+    let closing: Vec<super::agent::AgentId> = app
+        .agents
+        .keys()
+        .copied()
+        .filter(|id| app.connection_of(*id) == connection)
+        .collect();
+    for id in closing {
+        app.agents.shift_remove(&id);
+        app.agent_connections.remove(&id);
+        app.pane_layout.close(id);
+    }
+    if let Some(id) = app.pane_layout.focused_agent() {
+        app.active_view = ActiveView::Agent(id);
+    } else if app.agents.is_empty() {
+        app.active_view = ActiveView::Welcome;
+    }
+    app.show_toast("Pane closed.");
+}
+
 /// Run the main event loop until quit.
 /// Returns a [`RunResult`] with optional exit info (for the resume hint) and a flag for restarting the binary to pick up a downloaded update.
 /// The initial theme MUST come from `term_state.initial_theme`; see [`TerminalState::initial_theme`] for why.
@@ -1366,6 +1608,16 @@ pub(crate) async fn run(
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
+    // The primary connection is also slot 0 of the connection registry, so
+    // `/backend`, `/pane` and per-pane request routing all read one place.
+    let primary_spec = super::connections::ProfileSpec::new("", app_primary_workspace());
+    let primary_handle = super::connections::ConnectionHandle::new(
+        super::connections::ConnectionId::PRIMARY,
+        connection.tx.clone(),
+        connection.models.clone(),
+        connection.profile.clone(),
+        primary_spec,
+    );
     let mut app = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.app_init.app_view_new");
         AppView::new(
@@ -1375,6 +1627,14 @@ pub(crate) async fn run(
             terminal.backend_mut().writer_mut().escape_writer(),
         )
     };
+    app.connections
+        .insert(super::connections::ConnectionId::PRIMARY, primary_handle);
+    if let Some(handle) = app
+        .connections
+        .get_mut(&super::connections::ConnectionId::PRIMARY)
+    {
+        handle.cancel = Some(connection.cancel.clone());
+    }
     // The kernel has already resolved its default model, so a configuration with
     // providers but no usable `model` can be reported now instead of leaving the
     // status bar to show the built-in model's context window unexplained.
@@ -1957,7 +2217,11 @@ pub(crate) async fn run(
     let input_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     *reader_thread = ReaderThread::spawn(input_tx, input_paused.clone(), reader_parked.clone());
-    let mut acp_rx = connection.rx;
+    // Every ACP connection this process holds is merged into one stream, so the
+    // loop's look-ahead slot, drain batch and session-load barrier keep working
+    // unchanged. Routing stays per message via `session_id`
+    // (`acp_handler::routing`), which is what makes two panes independent.
+    let mut acp_mux = super::acp_mux::AcpMux::new(connection.rx);
     let mut connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
     // Optional read-only HTTP side channel. It is drained here so its bounded
@@ -1970,6 +2234,8 @@ pub(crate) async fn run(
     // re-spawn so a stale reload window can be recognized and discarded.
     let mut kernel_generation: u64 = 0;
     let mut kernel_reconnect: Option<KernelReconnect> = None;
+    // A `/pane open` spawn (its own kernel, its own runtime thread).
+    let mut pane_open: Option<PaneOpen> = None;
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let mut session_load_barrier = SessionLoadBarrier::new();
     let mut acp_peek: Option<AcpClientMessage> = None;
@@ -2202,7 +2468,7 @@ pub(crate) async fn run(
     let loop_entry = std::time::Instant::now();
     loop {
         if !session_load_barrier.is_empty() && acp_peek.is_none() {
-            acp_peek = acp_rx.try_recv().ok();
+            acp_peek = next_acp_message(&mut acp_mux);
         }
         let ready_loads = session_load_barrier.take_ready(
             |id| {
@@ -2285,6 +2551,16 @@ pub(crate) async fn run(
                 kernel_generation,
             ));
             app.show_toast("Restarting OpenBuild kernel...");
+            presenter.request(false);
+        }
+        if pane_open.is_none()
+            && let Some(spec) = app.pane_open_request.take()
+        {
+            pane_open = Some(start_pane_open(connect_flags.clone(), spec, &app));
+            presenter.request(false);
+        }
+        if let Some(connection) = app.pane_close_request.take() {
+            close_pane(&mut app, connection);
             presenter.request(false);
         }
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
@@ -2653,38 +2929,62 @@ pub(crate) async fn run(
             // Cancel/quit must stay above the firehose regardless
             msg = async {
                 match acp_peek.take() {
-                    Some(msg) => Some(msg),
-                    None => acp_rx.recv().await,
+                    Some(msg) => Some(super::acp_mux::MuxEvent::Message(msg)),
+                    None => acp_mux.recv().await,
                 }
             }, if input_rx.is_empty() && !acp_channel_closed => {
                 let Some(msg) = msg else {
-                    // The agent side dropped its sender. When the kernel process
-                    // died that is a recoverable crash, not a quit: explain it
-                    // and keep the loop alive so `/reconnect` can run. `break`
-                    // here would tear the TUI down before the notice rendered,
-                    // which is exactly the J1 failure.
-                    match kernel_exit_on_channel_close(
-                        openbuild_backend::profile::is_opencode(),
-                        openbuild_backend::health::exit(),
-                    ) {
-                        Some(exit) => {
-                            // The cancel-token arm may have reported this same
-                            // death first; one notice per death keeps the
-                            // transcript readable.
-                            if !kernel_lost_notified {
-                                mark_kernel_lost(&mut app, exit);
-                                kernel_lost_notified = true;
+                    // Every forwarder stopped and the merged stream closed,
+                    // which only happens when the loop itself is shutting down
+                    // (a single connection's death arrives as `MuxEvent::Closed`
+                    // instead). `k3` reports which slot died at that moment.
+                    break;
+                };
+                let msg = match msg {
+                    super::acp_mux::MuxEvent::Message(msg) => msg,
+                    super::acp_mux::MuxEvent::Closed { slot } => {
+                        match classify_connection_close(slot, &app) {
+                            ConnectionClose::Dead(exit) => {
+                                // The cancel-token arm may have reported this
+                                // same death first; one notice per death keeps
+                                // the transcript readable.
+                                let first_notice = match exit {
+                                    Some(exit) => {
+                                        if slot == 0 && !kernel_lost_notified {
+                                            mark_kernel_lost(&mut app, exit);
+                                            kernel_lost_notified = true;
+                                            true
+                                        } else if slot != 0 {
+                                            note_secondary_pane_lost(&mut app, slot, Some(exit));
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    None => {
+                                        if slot == 0 && !kernel_lost_notified {
+                                            kernel_lost_notified = true;
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                };
+                                if first_notice {
+                                    acp_mux.detach(slot);
+                                    if slot == 0 {
+                                        // `recv()`'s merged stream stays open
+                                        // through the other panes; disarm only
+                                        // when no connection is left.
+                                        acp_channel_closed = acp_mux.is_empty();
+                                    }
+                                    presenter.request(false);
+                                }
+                                continue;
                             }
-                            // `recv()` returns `None` forever on a closed
-                            // channel. Disarm the arm instead of busy-looping;
-                            // a successful restart installs a fresh receiver and
-                            // re-arms it.
-                            acp_channel_closed = true;
-                            presenter.request(false);
-                            continue;
+                            // A deliberate shutdown: keep the original behaviour.
+                            ConnectionClose::Quit => break,
                         }
-                        // A deliberate shutdown: keep the original behaviour.
-                        None => break,
                     }
                 };
                 let mut state_changed = false;
@@ -2703,7 +3003,7 @@ pub(crate) async fn run(
                 // Bounded, and cut short the moment input arrives, so wheel/key events wait at most one batch, never a whole token flood
                 let mut drained = 1;
                 while drained < ACP_DRAIN_BATCH_MAX && input_rx.is_empty() {
-                    let Ok(msg) = acp_rx.try_recv() else { break };
+                    let Ok(msg) = acp_mux.try_next_message() else { break };
                     drained += 1;
                     for msg in normalizer.normalize(msg) {
                         state_changed |= acp_handler::handle(msg, &mut app);
@@ -2760,7 +3060,7 @@ pub(crate) async fn run(
                                     .is_some_and(|a| a.session.loading_replay)
                             });
                         if agent_loading && acp_peek.is_none() {
-                            acp_peek = acp_rx.try_recv().ok();
+                            acp_peek = next_acp_message(&mut acp_mux);
                         }
                         let Some(result) = session_load_barrier.push_or_dispatch(
                             result,
@@ -3334,6 +3634,93 @@ pub(crate) async fn run(
                 presenter.request(false);
             }
 
+            // A second kernel finished starting (or failed to start). The loop
+            // adopts its channels here for the same reason as the reconnect
+            // path: only it may write to the merged stream.
+            opened = async {
+                match pane_open.as_mut() {
+                    Some(pending) => (&mut pending.rx)
+                        .await
+                        .map_err(|_| pending.connection),
+                    None => {
+                        std::future::pending::<
+                            Result<PaneOpenOutcome, super::connections::ConnectionId>,
+                        >()
+                        .await
+                    }
+                }
+            } => {
+                let Some(pending) = pane_open.take() else {
+                    continue;
+                };
+                let Ok(outcome) = opened else {
+                    tracing::error!("pane open task dropped its sender");
+                    continue;
+                };
+                let Some(conn) = outcome.conn else {
+                    let reason = outcome
+                        .error
+                        .unwrap_or_else(|| "the kernel could not be started".to_string());
+                    push_pane_open_failure(
+                        &mut app,
+                        format!("Could not open the second pane: {reason}"),
+                    );
+                    presenter.request(false);
+                    continue;
+                };
+                let connection = outcome.connection;
+                // The profile survives the spawn: it names the pane's private
+                // storage roots, so it must not be rebuilt from scratch here.
+                let spec = pending.spec;
+                // Register the connection before any agent exists so
+                // `/backend` and request routing can already answer for it.
+                let handle = super::connections::ConnectionHandle::new(
+                    connection,
+                    conn.tx.clone(),
+                    conn.models.clone(),
+                    conn.profile.clone(),
+                    spec,
+                );
+                let cancel = conn.cancel.clone();
+                let mut handle = handle;
+                handle.cancel = Some(cancel);
+                app.connections.insert(connection, handle);
+                acp_mux.attach(connection.0, conn.rx);
+                // The left column is whatever the user was looking at. It has
+                // to be registered *before* the new session switches the
+                // active view, or the split would hold a single pane and the
+                // primary transcript would vanish from the layout. When no
+                // single agent is on screen (the dashboard shows a session
+                // without one), fall back to the newest primary agent.
+                let left_pane = app.focused_agent().or_else(|| {
+                    app.agents
+                        .keys()
+                        .copied()
+                        .filter(|id| {
+                            app.connection_of(*id) == super::connections::ConnectionId::PRIMARY
+                        })
+                        .next_back()
+                });
+                let (agent_id, effects) =
+                    super::dispatch::dispatch_new_session_for_connection(
+                        &mut app, connection, false,
+                    );
+                if !effects.is_empty() {
+                    let _ = process_effects(effects, &mut tasks, &mut app, &progress_tx);
+                }
+                // The right pane is the agent this spawn just created. Reading
+                // `active_view` here would miss the pane whenever another view
+                // (the dashboard, or the primary agent) was showing, which is
+                // exactly what `/pane open` from the welcome screen does.
+                if let Some(left) = left_pane {
+                    app.pane_layout.open(left);
+                }
+                app.pane_layout.open(agent_id);
+                app.pane_layout.focus(agent_id);
+                app.show_toast("Second pane connected.");
+                presenter.request(false);
+            }
+
             // Kernel restart completed (or failed). Adopting the new connection
             // here is deliberate: `acp_rx` / `acp_tx` belong to this loop, so
             // nothing outside it can swap them.
@@ -3390,8 +3777,9 @@ pub(crate) async fn run(
                 };
 
                 // Swap the connection channels. The old bridge thread already
-                // exited (its child is gone), so nothing is left to drain.
-                acp_rx = conn.rx;
+                // exited (its child is gone), so nothing is left to drain. The
+                // mux re-attaches slot 0, which also aborts the dead forwarder.
+                acp_mux.attach(0, conn.rx);
                 // A live receiver replaces the closed one, and the next death is
                 // a new event that deserves its own notice.
                 acp_channel_closed = false;
@@ -3439,7 +3827,7 @@ pub(crate) async fn run(
                 // transcript replaces the stash instead of stacking on it.
                 let mut replayed = 0usize;
                 while replayed < RECONNECT_REPLAY_DRAIN_MAX {
-                    let Ok(msg) = acp_rx.try_recv() else { break };
+                    let Ok(msg) = acp_mux.try_next_message() else { break };
                     replayed += 1;
                     for msg in normalizer.normalize(msg) {
                         acp_handler::handle(msg, &mut app);
@@ -4522,6 +4910,126 @@ pub(crate) fn session_flags_for_effects(
         resume_local_miss: app.resume_local_miss.clone(),
     }
 }
+/// The connection an effect's request belongs to.
+///
+/// Effects carry the agent or session they act on, and an agent is bound to the
+/// connection that created it. That lets a prompt typed into pane B go to pane
+/// B's kernel while pane A keeps streaming. Effects without an agent (billing,
+/// auth, changelog) stay on the primary connection, which is where those
+/// process-wide features live.
+fn effect_connection(app: &AppView, effect: &super::actions::Effect) -> super::connections::ConnectionId {
+    use super::actions::Effect;
+    let agent_id = match effect {
+        Effect::CreateSession { agent_id, .. }
+        | Effect::CreateWorktreeSession { agent_id, .. }
+        | Effect::LoadSession { agent_id, .. }
+        | Effect::RestoreAndLoadSession { agent_id, .. }
+        | Effect::SendPrompt { agent_id, .. }
+        | Effect::ExecutePlan { agent_id, .. }
+        | Effect::SendBashCommand { agent_id, .. }
+        | Effect::Compact { agent_id, .. }
+        | Effect::SwitchModel { agent_id, .. }
+        | Effect::SendPromptBlocks { agent_id, .. }
+        | Effect::SendPromptNow { agent_id, .. }
+        | Effect::SetModeThenPrompt { agent_id, .. }
+        | Effect::FetchPromptHistory { agent_id, .. }
+        | Effect::FetchSessionAgentName { agent_id, .. }
+        | Effect::FetchMcpsList { agent_id, .. }
+        | Effect::McpAuthTrigger { agent_id, .. }
+        | Effect::McpSetupSubmit { agent_id, .. }
+        | Effect::FetchHooksList { agent_id, .. }
+        | Effect::FetchPluginsList { agent_id, .. }
+        | Effect::FetchMemoryList { agent_id, .. }
+        | Effect::MemoryToggle { agent_id, .. }
+        | Effect::MemoryForget { agent_id, .. }
+        | Effect::MemoryFlush { agent_id, .. }
+        | Effect::MemoryDream { agent_id, .. }
+        | Effect::HooksAction { agent_id, .. }
+        | Effect::PluginsAction { agent_id, .. }
+        | Effect::FetchMarketplaceList { agent_id, .. }
+        | Effect::CheckMarketplaceUpdates { agent_id, .. }
+        | Effect::FetchPluginCtaCatalog { agent_id, .. }
+        | Effect::FetchSkillsList { agent_id, .. }
+        | Effect::FetchWorkflowsList { agent_id, .. }
+        | Effect::ToggleSkill { agent_id, .. }
+        | Effect::MarketplaceAction { agent_id, .. }
+        | Effect::InstallPluginFromCta { agent_id, .. }
+        | Effect::ReloadPluginsForCta { agent_id, .. }
+        | Effect::FetchPluginCtaMcps { agent_id, .. }
+        | Effect::RetryPluginCtaMcps { agent_id, .. }
+        | Effect::UpsertMcpServer { agent_id, .. }
+        | Effect::DeleteMcpServer { agent_id, .. }
+        | Effect::ToggleMcpServer { agent_id, .. }
+        | Effect::ToggleMcpTool { agent_id, .. }
+        | Effect::ShareSession { agent_id, .. }
+        | Effect::ShowSessionInfo { agent_id, .. }
+        | Effect::ShowContextInfo { agent_id, .. }
+        | Effect::SendFeedback { agent_id, .. }
+        | Effect::FeedbackDraftRequest { agent_id, .. }
+        | Effect::UploadFeedbackTrace { agent_id, .. }
+        | Effect::SaveMemoryNote { agent_id, .. }
+        | Effect::RewriteMemoryNote { agent_id, .. }
+        | Effect::RefreshAvailableCommands { agent_id, .. }
+        | Effect::SendBtw { agent_id, .. }
+        | Effect::SendInterject { agent_id, .. }
+        | Effect::CreditLimitRecheck { agent_id, .. }
+        | Effect::SetCodingDataSharing { agent_id, .. }
+        | Effect::RenameSession { agent_id, .. }
+        | Effect::ResetSessionTitle { agent_id, .. }
+        | Effect::ForkSession { agent_id, .. }
+        | Effect::HydrateSessionMetaFromDisk { agent_id, .. }
+        | Effect::FetchRewindPoints { agent_id, .. }
+        | Effect::CancelTurnThenFetchRewindPoints { agent_id, .. }
+        | Effect::RewindExecute { agent_id, .. }
+        | Effect::FetchBilling { agent_id, .. }
+        | Effect::FetchSessionUsage { agent_id, .. }
+        | Effect::DebounceSuggestions { agent_id, .. }
+        | Effect::DebouncePluginCta { agent_id, .. }
+        | Effect::FetchShellSuggestions { agent_id, .. }
+        | Effect::FetchPromptSuggestion { agent_id, .. }
+        | Effect::RehydrateFeedbackImage { agent_id, .. } => Some(*agent_id),
+        _ => None,
+    };
+    match agent_id {
+        Some(id) => app.connection_of(id),
+        // Session-only effects: resolve the owning agent by its bound session.
+        None => match session_owner_of_effect(app, effect) {
+            Some(id) => app.connection_of(id),
+            None => super::connections::ConnectionId::PRIMARY,
+        },
+    }
+}
+
+/// Owner agent for effects that only carry a session id.
+fn session_owner_of_effect(
+    app: &AppView,
+    effect: &super::actions::Effect,
+) -> Option<super::agent::AgentId> {
+    use super::actions::Effect;
+    let session_id = match effect {
+        Effect::CancelTurn { session_id, .. }
+        | Effect::KillBgTask { session_id, .. }
+        | Effect::KillSubagent { session_id, .. }
+        | Effect::DeleteScheduledTask { session_id, .. }
+        | Effect::DemoteToBackground { session_id, .. }
+        | Effect::QueueRemove { session_id, .. }
+        | Effect::QueueReorder { session_id, .. }
+        | Effect::QueueClear { session_id }
+        | Effect::QueueEdit { session_id, .. }
+        | Effect::QueueHoldEdit { session_id, .. }
+        | Effect::QueueReleaseEdit { session_id, .. }
+        | Effect::QueueInterject { session_id, .. }
+        | Effect::SetSessionMode { session_id, .. }
+        | Effect::TogglePlanMode { session_id }
+        | Effect::SendRecap { session_id, .. } => Some(session_id),
+        _ => None,
+    }?;
+    app.agents
+        .iter()
+        .find(|(_, agent)| agent.session.session_id.as_ref() == Some(session_id))
+        .map(|(id, _)| *id)
+}
+
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.
 /// Shared by the event-loop `ActionThenForward` arm and tests (batches; no effect barrier between).
 /// The forward is meant for an agent composer. If the action left Welcome up (it opened the local-workspace ACK prompt instead of a session), the event lands in the welcome composer as a draft, which the eventual leave-home carries across, instead of answering that prompt.
@@ -4575,7 +5083,10 @@ fn process_effects(
         else {
             continue;
         };
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
+        // Route the request to the connection that owns the agent (or bound
+        // session) this effect acts on, so each pane talks to its own kernel.
+        let tx = app.acp_tx_for(effect_connection(app, &eff)).clone();
+        let (quit, meta) = effects::execute(eff, tasks, &tx, &app.cwd, &flags, progress_tx);
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
             && let super::app_view::AuthState::Authenticating {
                 request_seq,

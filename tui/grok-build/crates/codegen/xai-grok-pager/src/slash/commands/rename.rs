@@ -125,6 +125,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
+            pane_workspace: None,
+            pane_connection: None,
         }
     }
 

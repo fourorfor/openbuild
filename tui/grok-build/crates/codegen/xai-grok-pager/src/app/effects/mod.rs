@@ -126,8 +126,7 @@ pub(crate) fn execute(
     cwd: &Path,
     session_flags: &SessionFlags,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<RestoreProgressMsg>,
-) -> (bool, EffectMeta) {
-    let mut meta = EffectMeta::default();
+) -> (bool, EffectMeta) {    let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
         Effect::RegisterActiveSession { session_id, cwd } => {

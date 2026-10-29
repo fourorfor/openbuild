@@ -182,6 +182,15 @@ pub struct CommandExecCtx<'a> {
     /// Slash commands like `/multiline` read this to compute `!current` and dispatch a typed `Action::SetX(new)`.
     /// The dispatcher remains the single source of truth for the actual state mutation.
     pub(crate) pager_state: crate::settings::PagerLocalSnapshot,
+    /// Workspace a new pane should run in (`/pane open`). `None` means "the one
+    /// the TUI started in"; slash commands cannot read the filesystem cwd
+    /// themselves without breaking the sans-IO dispatch contract.
+    pub pane_workspace: Option<std::path::PathBuf>,
+    /// Connection whose backend `/backend` should report.
+    ///
+    /// `None` keeps the process-wide (primary) report. A focused pane sets this
+    /// so `/backend` describes the kernel that pane is actually talking to.
+    pub pane_connection: Option<crate::app::connections::ConnectionId>,
 }
 
 /// Origin of a slash command.

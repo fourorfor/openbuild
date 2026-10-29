@@ -763,6 +763,9 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    // Resolve the pane's connection before the mutable agent borrow: `/backend`
+    // and `/pane` need to know which kernel the focused pane talks to.
+    let pane_connection = app.connection_of(id);
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
@@ -875,6 +878,8 @@ pub(super) fn dispatch_send_prompt_submission(
                 screen_mode: app.screen_mode,
                 billing_surface_visible: app.usage_visible,
                 usage_command_visible: !app.has_external_auth_provider,
+                pane_workspace: Some(agent.session.cwd.clone()),
+                pane_connection: Some(pane_connection),
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,

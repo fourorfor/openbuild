@@ -548,6 +548,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             let result = cmd.run(&mut ctx, "groknight");
             match result {
@@ -579,6 +581,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             for name in ["terminal", "transparent"] {
                 match cmd.run(&mut ctx, name) {
@@ -644,6 +648,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             let result = cmd.run(&mut ctx, "");
             match result {
@@ -678,6 +684,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             let result = cmd.run(&mut ctx, "auto");
             match result {
@@ -708,6 +716,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             // "dark" is an alias for GrokNight.
             let result = cmd.run(&mut ctx, "dark");
@@ -812,6 +822,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             let result = cmd.run(&mut ctx, "nonexistent");
             if let CommandResult::Error(msg) = result {
@@ -840,6 +852,8 @@ mod tests {
                     yolo_mode: false,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
+                pane_workspace: None,
+                pane_connection: None,
             };
             let result = cmd.run(&mut ctx, "tokyonight");
             match result {
@@ -892,6 +906,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
+            pane_workspace: None,
+            pane_connection: None,
         }
     }
 

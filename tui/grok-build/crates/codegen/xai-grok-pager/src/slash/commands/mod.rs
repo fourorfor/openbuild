@@ -41,6 +41,8 @@ pub mod mcps;
 pub mod memory;
 pub mod memory_ops;
 pub mod model;
+pub mod pane;
+pub use pane::pane_report;
 pub mod multiline;
 pub mod new;
 pub mod personas;
@@ -95,6 +97,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(model::ModelCommand),
         Arc::new(context::ContextCommand),
         Arc::new(backend::BackendCommand),
+        Arc::new(pane::PaneCommand),
         Arc::new(reconnect::ReconnectCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(fork::ForkCommand),
@@ -219,6 +222,8 @@ mod tests {
                 yolo_mode: false,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
+            pane_workspace: None,
+            pane_connection: None,
         }
     }
     #[test]

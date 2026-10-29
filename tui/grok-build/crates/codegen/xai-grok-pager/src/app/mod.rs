@@ -9,6 +9,7 @@
 //! - [`effects`] — Effect → async task spawning
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
+pub(crate) mod acp_mux;
 pub mod actions;
 pub mod agent;
 pub mod agent_view;
@@ -18,6 +19,8 @@ pub(crate) mod cancel_latency;
 pub mod cli;
 pub(crate) mod command_catalog;
 pub mod consent;
+pub mod connections;
+pub(crate) mod pane_render;
 pub(crate) mod deferred_subagent_finishes;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;

@@ -440,6 +440,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "auto",
     "backend",
     "btw",
+    "pane",
     "cd",
     "changelog",
     "chat",

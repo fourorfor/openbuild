@@ -82,6 +82,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }

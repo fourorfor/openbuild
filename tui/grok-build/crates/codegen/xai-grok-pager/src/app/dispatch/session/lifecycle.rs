@@ -487,6 +487,100 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     });
     (agent_id, effects)
 }
+/// Create a session for a second pane, bound to `connection`.
+///
+/// Everything `dispatch_new_session_inner_with_id` does, except that the new
+/// agent's `acp_tx`, model catalog and workspace come from that pane's
+/// connection. That is what makes the two panes independent: prompts, permission
+/// answers and cancels all travel over their own kernel's channel, and the
+/// session databases never meet.
+pub(crate) fn dispatch_new_session_for_connection(
+    app: &mut AppView,
+    connection: crate::app::connections::ConnectionId,
+    stay_on_welcome: bool,
+) -> (AgentId, Vec<Effect>) {
+    let handle = app.connections.get(&connection);
+    let (models, acp_tx, workspace) = match handle {
+        Some(handle) => (
+            handle.models.clone(),
+            handle.acp_tx.clone(),
+            handle.spec.workspace.clone(),
+        ),
+        None => (app.models.clone(), app.acp_tx.clone(), app.cwd.clone()),
+    };
+    let mut effects = Vec::new();
+    reseed_tip_for_new_session(app);
+    let agent_id = AgentId(app.next_agent_id);
+    app.next_agent_id += 1;
+    let mut scrollback = ScrollbackState::new();
+    scrollback.set_appearance(app.appearance.clone());
+    let agent = AgentView::from_app(
+        app,
+        AgentSession {
+            id: agent_id,
+            acp_tx,
+            session_id: None,
+            models,
+            state: AgentState::Idle,
+            tracker: AcpUpdateTracker::new(),
+            cwd: workspace.clone(),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: app.default_yolo,
+            auto_mode: inherit_auto_mode(app),
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            credit_limit_blocked: false,
+            free_usage_blocked: false,
+            available_commands: app.bootstrap_acp_commands.clone(),
+            available_commands_generation: 1,
+            available_tools: None,
+            model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: true,
+            backend_mode_label: None,
+        },
+        scrollback,
+    );
+    app.agents.insert(agent_id, agent);
+    app.bind_agent_to_connection(agent_id, connection);
+    configure_agent_composer(app, agent_id);
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.active_pane = ActivePane::Prompt;
+        agent.session_starting_since = Some(Instant::now());
+        agent.session.prompt_history_loading = true;
+    }
+    if !stay_on_welcome {
+        switch_to_agent(app, agent_id, SwitchCause::New);
+    }
+    let session_id = assign_pending_session_id(app, agent_id, None);
+    effects.push(Effect::CreateSession {
+        agent_id,
+        cwd: workspace,
+        model_id: None,
+        permission_mode_override: None,
+        preferred_session_id: Some(session_id),
+        chat_kind: false,
+    });
+    (agent_id, effects)
+}
+
 /// Exit the current session and return to the welcome screen.
 /// Minimal has no welcome chrome, so this then opens an empty session (same as startup).
 pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<Effect> {

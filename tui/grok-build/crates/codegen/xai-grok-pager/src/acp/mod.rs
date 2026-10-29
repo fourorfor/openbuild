@@ -249,11 +249,18 @@ fn openbuild_backend_requested() -> bool {
     }
 }
 
-/// Connect to the opencode ACP kernel over stdio.
-async fn connect_opencode(
+/// Connect to the OpenBuild kernel as one ACP connection.
+///
+/// `slot` indexes the profile/health registries so two panes keep their own
+/// capability snapshot and liveness handles. `profile_launch` selects a private
+/// workspace plus data/state/cache roots; `None` keeps the historical
+/// single-kernel layout.
+pub async fn connect_opencode_slot(
     cancel: &CancellationToken,
     mut flags: ConnectFlags,
     kernel_path: Option<std::path::PathBuf>,
+    slot: usize,
+    profile_launch: Option<&openbuild_backend::spawn::ProfileLaunch>,
 ) -> Result<AcpConnection> {
     startup::enter(StartupPhase::ConfigLoad);
     let raw_config = xai_grok_shell::config::load_effective_config()
@@ -275,63 +282,68 @@ async fn connect_opencode(
     // Split OpenBuild's configuration out of the upstream `opencode` directory
     // before anything reads it: providers, `/uncensored` options and the managed
     // plugin all live under this directory now. The move only happens once,
-    // while the destination is still empty.
-    let migration = openbuild_backend::plugin::migrate_legacy_config_dir();
-    if !migration.is_noop() {
-        tracing::info!(
-            target = migration
-                .target
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            moved = migration.moved.len(),
-            "moved the OpenBuild config out of the upstream opencode directory"
-        );
-    }
-
-    // The managed `/uncensored` plugin must exist before the kernel starts so
-    // its agent is in the first ACP catalog. A failure here is reported and
-    // does not block the normal build agent.
-    match openbuild_backend::plugin::ensure_uncensored_plugin() {
-        openbuild_backend::plugin::InstallOutcome::Installed { path, updated } => {
-            tracing::info!(path = %path.display(), updated, "uncensored plugin ready");
-        }
-        openbuild_backend::plugin::InstallOutcome::Unmanaged { path } => {
-            tracing::warn!(
-                path = %path.display(),
-                "uncensored plugin path holds an unmanaged file; leaving it untouched"
+    // while the destination is still empty. A secondary profile owns its config
+    // directory from the start, so the migration and the shared plugin install
+    // stay with the primary connection.
+    if slot == 0 {
+        let migration = openbuild_backend::plugin::migrate_legacy_config_dir();
+        if !migration.is_noop() {
+            tracing::info!(
+                target = migration
+                    .target
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                moved = migration.moved.len(),
+                "moved the OpenBuild config out of the upstream opencode directory"
             );
         }
-        openbuild_backend::plugin::InstallOutcome::NoConfigDir => {
-            tracing::debug!("uncensored plugin not installed: no config directory");
-        }
-        openbuild_backend::plugin::InstallOutcome::Failed { path, error } => {
-            tracing::warn!(
-                path = path.as_ref().map(|path| path.display().to_string()),
-                %error,
-                "uncensored plugin install failed"
-            );
+
+        // The managed `/uncensored` plugin must exist before the kernel starts so
+        // its agent is in the first ACP catalog. A failure here is reported and
+        // does not block the normal build agent.
+        match openbuild_backend::plugin::ensure_uncensored_plugin() {
+            openbuild_backend::plugin::InstallOutcome::Installed { path, updated } => {
+                tracing::info!(path = %path.display(), updated, "uncensored plugin ready");
+            }
+            openbuild_backend::plugin::InstallOutcome::Unmanaged { path } => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "uncensored plugin path holds an unmanaged file; leaving it untouched"
+                );
+            }
+            openbuild_backend::plugin::InstallOutcome::NoConfigDir => {
+                tracing::debug!("uncensored plugin not installed: no config directory");
+            }
+            openbuild_backend::plugin::InstallOutcome::Failed { path, error } => {
+                tracing::warn!(
+                    path = path.as_ref().map(|path| path.display().to_string()),
+                    %error,
+                    "uncensored plugin install failed"
+                );
+            }
         }
     }
 
-    let spec = openbuild_backend::spawn::default_spec(kernel_path).ok_or_else(|| {
-        anyhow::anyhow!(
-            "openbuild kernel not found; set OPENBUILD_KERNEL or place openbuild-kernel.exe next to this executable"
-        )
-    })?;
-    openbuild_backend::profile::set_kind(openbuild_backend::BackendKind::OpenCode);
+    let spec = openbuild_backend::spawn::spec_for_profile(kernel_path, profile_launch)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "openbuild kernel not found; set OPENBUILD_KERNEL or place openbuild-kernel.exe next to this executable"
+            )
+        })?;
+    openbuild_backend::profile::set_kind_in(slot, openbuild_backend::BackendKind::OpenCode);
 
     let bridge = openbuild_backend::transport::bridge_subprocess(spec, cancel.clone())?;
     // Publish the liveness handles before `initialize` runs so a kernel that
     // dies during the handshake still reports a reason.
-    openbuild_backend::health::set_active(bridge.health.clone());
+    openbuild_backend::health::set_active_in(slot, bridge.health.clone());
     let endpoint = AgentEndpoint {
         tx: bridge.channel.tx,
         rx: bridge.channel.rx,
         cancel: bridge.cancel,
         location: AgentLocation::Subprocess(bridge.thread_handle),
     };
-    let mut connection = initialize_connection(endpoint, &flags, auth_manager).await?;
+    let mut connection = initialize_connection_slot(endpoint, &flags, auth_manager, slot).await?;
     // The kernel advertises the server that owns this ACP session. Connecting
     // to it is what makes the side channel see real events; a side-car server
     // would have its own in-process bus.
@@ -349,6 +361,15 @@ async fn connect_opencode(
         }
     }
     Ok(connection)
+}
+
+/// Connect to the opencode ACP kernel over stdio on the primary profile.
+async fn connect_opencode(
+    cancel: &CancellationToken,
+    flags: ConnectFlags,
+    kernel_path: Option<std::path::PathBuf>,
+) -> Result<AcpConnection> {
+    connect_opencode_slot(cancel, flags, kernel_path, 0, None).await
 }
 
 /// Restart the kernel and re-initialize the connection.
@@ -370,6 +391,16 @@ pub(in crate::acp) async fn initialize_connection(
     flags: &ConnectFlags,
     auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 ) -> Result<AcpConnection> {
+    initialize_connection_slot(endpoint, flags, auth_manager, 0).await
+}
+
+/// [`initialize_connection`], publishing the profile into one connection slot.
+pub(in crate::acp) async fn initialize_connection_slot(
+    endpoint: AgentEndpoint,
+    flags: &ConnectFlags,
+    auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
+    slot: usize,
+) -> Result<AcpConnection> {
     let AgentEndpoint {
         tx,
         rx,
@@ -384,7 +415,7 @@ pub(in crate::acp) async fn initialize_connection(
     startup::enter(StartupPhase::AcpInitialize);
     let agent = initialize(&tx, flags).await?;
     let profile = openbuild_backend::BackendProfile::detect(&agent.response, None);
-    openbuild_backend::profile::set_active(profile.clone());
+    openbuild_backend::profile::set_active_in(slot, profile.clone());
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&agent.auth_methods);
     startup::enter(StartupPhase::EagerAuth);

@@ -56,6 +56,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Minimal,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         match TranscriptCommand.run(&mut ctx, "") {
@@ -75,6 +77,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Minimal,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         };
         assert!(matches!(

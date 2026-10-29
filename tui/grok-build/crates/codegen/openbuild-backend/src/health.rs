@@ -94,32 +94,65 @@ impl Default for KernelHealth {
     }
 }
 
-static ACTIVE: OnceLock<Mutex<Option<KernelHealth>>> = OnceLock::new();
+static ACTIVE: OnceLock<Mutex<Vec<Option<KernelHealth>>>> = OnceLock::new();
 static RECONNECT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-fn active_slot() -> &'static Mutex<Option<KernelHealth>> {
-    ACTIVE.get_or_init(|| Mutex::new(None))
+fn active_slot() -> &'static Mutex<Vec<Option<KernelHealth>>> {
+    ACTIVE.get_or_init(|| {
+        Mutex::new(
+            std::iter::repeat_with(|| None)
+                .take(crate::profile::MAX_CONNECTIONS)
+                .collect(),
+        )
+    })
 }
 
-/// Publish the health handles of the current connection.
+/// Publish the health handles of one connection.
 ///
 /// Called once per connection; a reconnect installs a fresh, empty one so a
 /// stale crash reason can never outlive its kernel.
-pub fn set_active(health: KernelHealth) {
-    if let Ok(mut guard) = active_slot().lock() {
-        *guard = Some(health);
+pub fn set_active_in(slot: usize, health: KernelHealth) {
+    if let Ok(mut guard) = active_slot().lock()
+        && let Some(entry) = guard.get_mut(slot)
+    {
+        *entry = Some(health);
     }
-    RECONNECT_REQUESTED.store(false, Ordering::Release);
+    if slot == 0 {
+        RECONNECT_REQUESTED.store(false, Ordering::Release);
+    }
+}
+
+/// Publish the health handles of the primary connection (slot 0).
+pub fn set_active(health: KernelHealth) {
+    set_active_in(0, health);
+}
+
+/// The health handles of one connection, if it has one.
+pub fn active_in(slot: usize) -> Option<KernelHealth> {
+    active_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(slot).cloned().flatten())
+}
+
+/// The most recent exit reason of one connection.
+pub fn exit_in(slot: usize) -> Option<BridgeExit> {
+    active_in(slot).and_then(|health| health.read())
+}
+
+/// Whether one connection's kernel is known to have died.
+pub fn is_dead_in(slot: usize) -> bool {
+    exit_in(slot).is_some_and(BridgeExit::is_kernel_exit)
 }
 
 /// The current connection's health handles, if a connection was ever made.
 pub fn active() -> Option<KernelHealth> {
-    active_slot().lock().ok().and_then(|guard| guard.clone())
+    active_in(0)
 }
 
-/// The most recent exit reason of the current connection.
+/// The most recent exit reason of the primary connection.
 pub fn exit() -> Option<BridgeExit> {
-    active().and_then(|health| health.read())
+    exit_in(0)
 }
 
 /// Record a death the TUI observed itself.
@@ -129,19 +162,30 @@ pub fn exit() -> Option<BridgeExit> {
 /// reaping the child. Publishing the observed reason keeps [`is_dead`] — and
 /// therefore `/reconnect` — consistent with the notice the user just saw.
 pub fn record(exit: BridgeExit) {
-    if let Some(health) = active() {
+    record_in(0, exit);
+}
+
+/// Record a death the TUI observed for one connection.
+pub fn record_in(slot: usize, exit: BridgeExit) {
+    if let Some(health) = active_in(slot) {
         health.record(exit);
     }
 }
 
-/// Whether the kernel is known to have died and has not been reconnected yet.
+/// Whether the primary kernel is known to have died and has not been
+/// reconnected yet.
 pub fn is_dead() -> bool {
-    exit().is_some_and(BridgeExit::is_kernel_exit)
+    is_dead_in(0)
 }
 
 /// The last `max` stderr lines of the current connection.
 pub fn stderr_tail(max: usize) -> Vec<String> {
-    active()
+    stderr_tail_in(0, max)
+}
+
+/// The last `max` stderr lines of one connection.
+pub fn stderr_tail_in(slot: usize, max: usize) -> Vec<String> {
+    active_in(slot)
         .map(|health| health.stderr_tail(max))
         .unwrap_or_default()
 }

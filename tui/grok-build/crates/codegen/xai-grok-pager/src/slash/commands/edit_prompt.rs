@@ -44,6 +44,8 @@ mod tests {
             screen_mode: mode,
             billing_surface_visible: true,
             usage_command_visible: true,
+            pane_workspace: None,
+            pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
         }
     }

@@ -62,6 +62,8 @@ fn exec_ctx(models: &ModelState, screen_mode: ScreenMode) -> CommandExecCtx<'_> 
         billing_surface_visible: true,
         usage_command_visible: true,
         pager_state: PagerLocalSnapshot::default(),
+        pane_workspace: None,
+        pane_connection: None,
     }
 }
 

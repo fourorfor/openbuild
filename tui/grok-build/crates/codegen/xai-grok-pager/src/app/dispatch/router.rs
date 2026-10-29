@@ -711,6 +711,109 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             openbuild_backend::health::request_reconnect();
             vec![]
         }
+        Action::PaneOpen { label } => {
+            // Same rule as /reconnect: the loop owns the ACP receivers, so
+            // dispatch records the profile and the loop spawns the kernel.
+            let Some(connection) = crate::slash::commands::pane::next_free_connection(app) else {
+                push_pane_notice(
+                    app,
+                    format!(
+                        "No free connection slot. At most {} kernels can run at once.",
+                        openbuild_backend::profile::MAX_CONNECTIONS
+                    ),
+                );
+                return vec![];
+            };
+            if app.connections.contains_key(&connection) {
+                push_pane_notice(app, "That profile is already open.".to_string());
+                return vec![];
+            }
+            if app.pane_open_request.is_some() {
+                push_pane_notice(app, "A pane is already opening; wait for it.".to_string());
+                return vec![];
+            }
+            let workspace = app
+                .connections
+                .get(&crate::app::connections::ConnectionId::PRIMARY)
+                .map(|handle| handle.spec.workspace.clone())
+                .unwrap_or_else(|| app.cwd.clone());
+            app.pane_open_request =
+                Some(crate::slash::commands::pane::profile_for_pane(&label, workspace));
+            push_pane_notice(app, format!("Opening pane '{label}'…"));
+            vec![]
+        }
+        Action::PaneClose { label } => {
+            let target = match label.as_deref() {
+                Some(label) => app
+                    .connections
+                    .values()
+                    .find(|handle| handle.spec.label == label)
+                    .map(|handle| handle.id),
+                // No label: the focused pane when it owns a kernel, otherwise
+                // the only secondary pane. `/pane close` is typed while
+                // looking at the split, so it must work from either column
+                // instead of only when the right pane happens to have focus.
+                None => app
+                    .focused_agent()
+                    .map(|id| app.connection_of(id))
+                    .filter(|id| *id != crate::app::connections::ConnectionId::PRIMARY)
+                    .or_else(|| {
+                        app.connections
+                            .keys()
+                            .copied()
+                            .find(|id| *id != crate::app::connections::ConnectionId::PRIMARY)
+                    }),
+            };
+            let Some(target) = target else {
+                push_pane_notice(
+                    app,
+                    "No secondary pane to close. Use /pane list to see open panes.".to_string(),
+                );
+                return vec![];
+            };
+            if target == crate::app::connections::ConnectionId::PRIMARY {
+                push_pane_notice(
+                    app,
+                    "The primary pane cannot be closed; it is this session.".to_string(),
+                );
+                return vec![];
+            }
+            app.pane_close_request = Some(target);
+            vec![]
+        }
+        Action::PaneFocus { target } => {
+            if !app.pane_layout.is_split() {
+                push_pane_notice(
+                    app,
+                    "Only one pane is open. Start a comparison with /pane open.".to_string(),
+                );
+                return vec![];
+            }
+            let changed = match target.as_deref() {
+                None | Some("next") => app.pane_layout.cycle_focus(),
+                Some("left") => app
+                    .pane_layout
+                    .panes
+                    .first()
+                    .copied()
+                    .is_some_and(|id| app.pane_layout.focus(id)),
+                Some("right") => app
+                    .pane_layout
+                    .panes
+                    .get(1)
+                    .copied()
+                    .is_some_and(|id| app.pane_layout.focus(id)),
+                _ => false,
+            };
+            if changed && let Some(id) = app.pane_layout.focused_agent() {
+                app.active_view = crate::app::app_view::ActiveView::Agent(id);
+            }
+            vec![]
+        }
+        Action::PaneList => {
+            push_pane_notice(app, crate::slash::commands::pane_report(app));
+            vec![]
+        }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
             vec![]
@@ -1834,4 +1937,19 @@ pub(super) fn dispatch_action_result(
             }
         },
     }
+}
+
+/// Show a `/pane` result.
+///
+/// Pane commands run from either view, so the message goes to the focused pane
+/// when there is one (that is where the user is looking) and falls back to the
+/// app-level toast otherwise.
+fn push_pane_notice(app: &mut crate::app::app_view::AppView, message: String) {
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(message));
+        return;
+    }
+    app.pane_notice = Some(message);
 }

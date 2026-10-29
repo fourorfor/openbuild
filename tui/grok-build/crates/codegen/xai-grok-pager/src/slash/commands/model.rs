@@ -417,6 +417,8 @@ mod tests {
                 yolo_mode: false,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
+            pane_workspace: None,
+            pane_connection: None,
         }
     }
 

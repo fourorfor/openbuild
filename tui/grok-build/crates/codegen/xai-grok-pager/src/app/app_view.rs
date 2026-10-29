@@ -199,6 +199,7 @@ use super::PagerTerminal;
 use super::actions::Action;
 use super::agent::AgentId;
 use super::agent_view::{AgentView, AppRenderParams};
+use super::connections;
 use super::bundle::BundleState;
 /// Which view is currently displayed.
 /// `AgentDashboard` does not carry state directly because `DashboardState` is not `Copy`.
@@ -523,6 +524,19 @@ pub struct AppView {
     pub cwd_has_git_ancestor: bool,
     /// ACP channel for sending requests (shared resource, cloned into agents).
     pub acp_tx: AcpAgentTx,
+    /// Every live ACP connection, indexed by [`connections::ConnectionId`].
+    ///
+    /// Slot 0 is the connection this process started with, so `acp_tx` /
+    /// `models` above stay its mirror and single-connection behaviour is
+    /// unchanged. `/pane` adds slots so two kernels can run side by side.
+    pub connections: indexmap::IndexMap<connections::ConnectionId, connections::ConnectionHandle>,
+    /// Which panes are on screen, which one has the keyboard, and the split.
+    pub pane_layout: connections::PaneLayout,
+    /// Which connection each agent's requests go to.
+    ///
+    /// Absent means slot 0 (`acp_tx` above), so every agent created before E2
+    /// needs no change. `/pane` records the second pane's agents here.
+    pub agent_connections: std::collections::HashMap<AgentId, connections::ConnectionId>,
     /// Local cache of bundle sync/status state from the shell.
     pub(crate) bundle_state: BundleState,
     /// Reusable scratch buffer for rendering.
@@ -1023,6 +1037,20 @@ pub struct AppView {
     pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
+    /// A `/pane open` waiting for the event loop to spawn its kernel.
+    ///
+    /// The loop owns the ACP receivers, so dispatch can only record intent; the
+    /// loop consumes this and clears it once the pane is connected or failed.
+    pub pane_open_request: Option<connections::ProfileSpec>,
+    /// A `/pane close` waiting to stop its kernel (the loop owns the cancel token).
+    pub pane_close_request: Option<connections::ConnectionId>,
+    /// Screen rectangle the last frame painted panes into.
+    ///
+    /// Click-to-focus must use the geometry the user actually saw, not a fresh
+    /// guess: a resize between paint and click would otherwise move the divider.
+    pub last_pane_area: Option<ratatui::layout::Rect>,
+    /// Completed `/pane` work the event loop must report (open ok/failed).
+    pub pane_notice: Option<String>,
     /// Structured startup warnings collected from the terminal diagnostics engine at launch.
     /// Empty when the environment is healthy.
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
@@ -1144,6 +1172,103 @@ impl AppView {
     }
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
+    }
+    /// The connection an agent's requests go to.
+    ///
+    /// Unregistered agents belong to slot 0, which is the connection the app
+    /// started with — that keeps every pre-E2 agent on the primary kernel.
+    pub fn connection_of(&self, agent_id: AgentId) -> connections::ConnectionId {
+        self.agent_connections
+            .get(&agent_id)
+            .copied()
+            .unwrap_or(connections::ConnectionId::PRIMARY)
+    }
+
+    /// Bind an agent to a connection.
+    pub fn bind_agent_to_connection(
+        &mut self,
+        agent_id: AgentId,
+        connection: connections::ConnectionId,
+    ) {
+        if connection == connections::ConnectionId::PRIMARY {
+            self.agent_connections.remove(&agent_id);
+        } else {
+            self.agent_connections.insert(agent_id, connection);
+        }
+    }
+
+    /// The send half for one connection, falling back to the primary channel.
+    ///
+    /// The fallback matters for tests and for the moment between "pane opened"
+    /// and "connection registered": requests must still go somewhere sensible
+    /// instead of being silently dropped.
+    pub fn acp_tx_for(&self, connection: connections::ConnectionId) -> &AcpAgentTx {
+        self.connections
+            .get(&connection)
+            .map(|handle| &handle.acp_tx)
+            .unwrap_or(&self.acp_tx)
+    }
+
+    /// The model catalog of one connection (primary when unregistered).
+    pub fn models_for(&self, connection: connections::ConnectionId) -> &ModelState {
+        self.connections
+            .get(&connection)
+            .map(|handle| &handle.models)
+            .unwrap_or(&self.models)
+    }
+
+    /// The focused agent, preferring the focused pane over `active_view`.
+    ///
+    /// Input, cancellation and permission answers all route through this, so a
+    /// split screen never applies an action to the unfocused pane.
+    pub fn focused_agent(&self) -> Option<AgentId> {
+        if self.pane_layout.is_split()
+            && let Some(id) = self.pane_layout.focused_agent()
+        {
+            return Some(id);
+        }
+        self.active_view.agent_id().or(self.home_session_agent)
+    }
+
+    /// Move the keyboard to the pane under a terminal coordinate.
+    ///
+    /// Returns `true` when focus moved, so the caller can repaint. The pane
+    /// rectangles come from the last frame the app drew, which is the same
+    /// geometry the renderer used, so a click can never disagree with what the
+    /// user saw.
+    pub fn focus_pane_at(&mut self, column: u16, row: u16) -> bool {
+        if !self.pane_layout.is_split() {
+            return false;
+        }
+        let Some(area) = self.last_pane_area else {
+            return false;
+        };
+        let Some(target) = super::pane_render::pane_at(&self.pane_layout, area, column, row) else {
+            return false;
+        };
+        if !self.pane_layout.focus(target) {
+            return false;
+        }
+        self.active_view = ActiveView::Agent(target);
+        true
+    }
+
+    /// Replace the primary connection's channel (reconnect) and re-point every
+    /// agent that was on it.
+    pub fn adopt_primary_connection(
+        &mut self,
+        models: ModelState,
+        profile: openbuild_backend::BackendProfile,
+    ) {
+        if let Some(handle) = self
+            .connections
+            .get_mut(&connections::ConnectionId::PRIMARY)
+        {
+            handle.models = models.clone();
+            handle.profile = profile;
+            handle.alive = true;
+        }
+        self.models = models;
     }
     /// User is not gated (no gate from remote settings or subscription fallback).
     pub fn has_access(&self) -> bool {
@@ -1368,6 +1493,9 @@ impl AppView {
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
             acp_tx,
+            connections: indexmap::IndexMap::new(),
+            pane_layout: connections::PaneLayout::default(),
+            agent_connections: std::collections::HashMap::new(),
             bundle_state: BundleState::default(),
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
@@ -1553,6 +1681,10 @@ impl AppView {
             pending_gate_verification: None,
             gate_verify_gen: 0,
             reconnect_pending: false,
+            pane_open_request: None,
+            pane_close_request: None,
+            last_pane_area: None,
+            pane_notice: None,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
@@ -2248,6 +2380,14 @@ impl AppView {
             }
             self.last_known_terminal_rows = *rows;
             self.apply_effective_compact();
+        }
+        // A click in the other pane moves the keyboard there before the event is
+        // routed, so the click and every later keystroke act on the same pane.
+        if let Event::Mouse(mouse) = ev
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.pane_layout.is_split()
+        {
+            self.focus_pane_at(mouse.column, mouse.row);
         }
         if let Some(key) = key_event
             && let Some(pending) = &self.pending_action
@@ -4254,6 +4394,15 @@ impl AppView {
     }
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
         self.resync_announcement_slash_gate_on_divergence();
+        // Panes are agents, and sessions come and go: a closed session or a
+        // finished subagent takeover must not leave a rectangle pointing at an
+        // agent that no longer exists. Reconcile against the live set once per
+        // frame so the layout can never outlive its transcripts.
+        if self.pane_layout.retain_existing(&self.agents) && self.pane_layout.is_split()
+            && let Some(id) = self.pane_layout.focused_agent()
+        {
+            self.active_view = ActiveView::Agent(id);
+        }
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
                 (hooks.draw)(self, terminal);
@@ -4366,6 +4515,35 @@ impl AppView {
                         (None, full_area)
                     };
                 if view_area.height > 0 {
+                    // Two kernels side by side: each pane renders its own agent
+                    // into its own rectangle. Input, cursor and mouse routing are
+                    // decided by the focused pane, so a click or a keystroke never
+                    // lands in the wrong transcript.
+                    if self.pane_layout.is_split()
+                        && !matches!(active_view, ActiveView::AgentDashboard)
+                    {
+                        self.last_pane_area = Some(view_area);
+                        if let Some(split) = super::pane_render::render_split_panes(
+                            super::pane_render::SplitPaneParams {
+                                layout: &self.pane_layout,
+                                agents,
+                                buf: f.buffer_mut(),
+                                area: view_area,
+                                registry,
+                                scratch,
+                                pending_hint,
+                                link_spans,
+                                announcements: &self.active_announcements,
+                                hidden_ids: &self.hidden_announcement_ids,
+                                privacy_banner: privacy_banner_agent,
+                                mouse_pos: agent_mouse_pos,
+                            },
+                        ) {
+                            return (split, Self::merge_escapes(notif_escapes, None));
+                        }
+                    } else {
+                        self.last_pane_area = None;
+                    }
                     match *active_view {
                         ActiveView::Welcome => {
                             let mut flags_vec: Vec<crate::views::prompt_widget::PromptFlag<'_>> =
@@ -5239,6 +5417,20 @@ impl AppView {
     pub fn tick(&mut self) -> bool {
         self.fps_hud.note_tick();
         let mut needs_redraw = false;
+        // A `/pane` result produced while no session was on screen lands here on
+        // the next tick, so the message is never lost.
+        if let Some(notice) = self.pane_notice.take() {
+            if let Some(id) = self.focused_agent() {
+                if let Some(agent) = self.agents.get_mut(&id) {
+                    agent
+                        .scrollback
+                        .push_block(crate::scrollback::block::RenderBlock::system(notice));
+                }
+            } else {
+                self.show_toast(&notice);
+            }
+            needs_redraw = true;
+        }
         needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {

@@ -3005,6 +3005,68 @@ fn refresh_mcp_list_clears_managed_connectors_wait() {
         [Effect::FetchMcpsList { cache: false, .. }]
     ));
 }
+/// `/pane close` without a label must still find the secondary pane when the
+/// left column owns the keyboard: the split is what the user is looking at, not
+/// only the right pane.
+#[test]
+fn pane_close_from_the_primary_pane_targets_the_secondary() {
+    let mut app = test_app_with_agent();
+    let primary = AgentId(0);
+    let secondary = AgentId(1);
+    let session = make_test_agent_session(&app, secondary, "secondary-session");
+    let mut agent = AgentView::new(session, ScrollbackState::new());
+    agent.active_pane = ActivePane::Scrollback;
+    app.agents.insert(secondary, agent);
+    app.next_agent_id = 2;
+
+    let (client, _agent) = xai_acp_lib::acp_channels();
+    let connection = crate::app::connections::ConnectionId(1);
+    app.connections.insert(
+        connection,
+        crate::app::connections::ConnectionHandle::new(
+            connection,
+            client.tx,
+            ModelState::default(),
+            openbuild_backend::BackendProfile::opencode(None),
+            crate::app::connections::ProfileSpec::new("secondary", PathBuf::from("/tmp")),
+        ),
+    );
+    app.bind_agent_to_connection(secondary, connection);
+    app.pane_layout.open(primary);
+    app.pane_layout.open(secondary);
+    app.pane_layout.focus(primary);
+    assert_eq!(app.focused_agent(), Some(primary));
+
+    let _ = dispatch(Action::PaneClose { label: None }, &mut app);
+    assert_eq!(
+        app.pane_close_request,
+        Some(connection),
+        "closing from the primary pane must reach the only secondary pane"
+    );
+}
+
+/// `/pane close` never silently targets the primary connection.
+#[test]
+fn pane_close_refuses_when_only_the_primary_is_connected() {
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::PaneClose { label: None }, &mut app);
+    assert_eq!(app.pane_close_request, None);
+    // With a session on screen the notice is a transcript block; without one it
+    // is held in `pane_notice`. Accept either, but require the explanation.
+    let mut texts: Vec<String> = Vec::new();
+    if let Some(agent) = app.agents.values().next()
+        && let Some(entry) = agent.scrollback.last()
+        && let crate::scrollback::block::RenderBlock::System(block) = &entry.block
+    {
+        texts.push(block.text.clone());
+    }
+    texts.extend(app.pane_notice.clone());
+    assert!(
+        texts.iter().any(|text| text.contains("No secondary pane")),
+        "expected an explanation, got {texts:?}"
+    );
+}
+
 fn agent_ref(app: &AppView, id: AgentId) -> &AgentView {
     let Some(agent) = app.agents.get(&id) else {
         panic!("expected agent {id:?}");
