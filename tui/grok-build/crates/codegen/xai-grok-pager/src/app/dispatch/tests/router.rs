@@ -3045,6 +3045,68 @@ fn pane_close_from_the_primary_pane_targets_the_secondary() {
     );
 }
 
+/// A profile that pins a model starts its session on that model: the id is
+/// carried by `CreateSession`, not applied afterwards with `SetSessionModel`.
+#[test]
+fn a_profile_model_is_carried_into_the_new_session() {
+    let mut app = test_app_with_agent();
+    let (client, _agent) = xai_acp_lib::acp_channels();
+    let connection = crate::app::connections::ConnectionId(1);
+    let mut spec =
+        crate::app::connections::ProfileSpec::new("cheap", PathBuf::from("/tmp/cheap"));
+    spec.model = Some("deepseek/deepseek-chat".to_string());
+    app.connections.insert(
+        connection,
+        crate::app::connections::ConnectionHandle::new(
+            connection,
+            client.tx,
+            ModelState::default(),
+            openbuild_backend::BackendProfile::opencode(None),
+            spec,
+        ),
+    );
+
+    let (_agent_id, effects) =
+        crate::app::dispatch::dispatch_new_session_for_connection(&mut app, connection, true);
+    let model = effects.iter().find_map(|effect| match effect {
+        Effect::CreateSession { model_id, .. } => Some(model_id.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        model,
+        Some(Some(acp::ModelId::from(
+            "deepseek/deepseek-chat".to_string()
+        ))),
+        "the pinned model must travel with CreateSession"
+    );
+}
+
+/// The primary path is unchanged: no pinned model means no `modelId` override.
+#[test]
+fn an_unpinned_profile_leaves_the_model_alone() {
+    let mut app = test_app_with_agent();
+    let (client, _agent) = xai_acp_lib::acp_channels();
+    let connection = crate::app::connections::ConnectionId(1);
+    app.connections.insert(
+        connection,
+        crate::app::connections::ConnectionHandle::new(
+            connection,
+            client.tx,
+            ModelState::default(),
+            openbuild_backend::BackendProfile::opencode(None),
+            crate::app::connections::ProfileSpec::new("plain", PathBuf::from("/tmp/plain")),
+        ),
+    );
+
+    let (_agent_id, effects) =
+        crate::app::dispatch::dispatch_new_session_for_connection(&mut app, connection, true);
+    let model = effects.iter().find_map(|effect| match effect {
+        Effect::CreateSession { model_id, .. } => Some(model_id.clone()),
+        _ => None,
+    });
+    assert_eq!(model, Some(None));
+}
+
 /// `/pane close` never silently targets the primary connection.
 #[test]
 fn pane_close_refuses_when_only_the_primary_is_connected() {

@@ -711,7 +711,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             openbuild_backend::health::request_reconnect();
             vec![]
         }
-        Action::PaneOpen { label } => {
+        Action::PaneOpen { label, model } => {
             // Same rule as /reconnect: the loop owns the ACP receivers, so
             // dispatch records the profile and the loop spawns the kernel.
             let Some(connection) = crate::slash::commands::pane::next_free_connection(app) else {
@@ -737,8 +737,12 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 .get(&crate::app::connections::ConnectionId::PRIMARY)
                 .map(|handle| handle.spec.workspace.clone())
                 .unwrap_or_else(|| app.cwd.clone());
-            app.pane_open_request =
-                Some(crate::slash::commands::pane::profile_for_pane(&label, workspace));
+            // The model is *not* resolved here: the catalog that matters is the
+            // new kernel's own, and it only exists after the handshake. The spec
+            // carries the user's input and the event loop normalises it there.
+            app.pane_open_request = Some(crate::slash::commands::pane::profile_for_pane(
+                &label, workspace, model,
+            ));
             push_pane_notice(app, format!("Opening pane '{label}'…"));
             vec![]
         }

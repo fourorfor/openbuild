@@ -500,13 +500,23 @@ pub(crate) fn dispatch_new_session_for_connection(
     stay_on_welcome: bool,
 ) -> (AgentId, Vec<Effect>) {
     let handle = app.connections.get(&connection);
-    let (models, acp_tx, workspace) = match handle {
+    let (models, acp_tx, workspace, model_id) = match handle {
         Some(handle) => (
             handle.models.clone(),
             handle.acp_tx.clone(),
             handle.spec.workspace.clone(),
+            // A profile may pin the model it starts with. The id was already
+            // normalised against this connection's own catalog when the pane
+            // was opened, so `CreateSession` can carry it as `_meta.modelId`
+            // and the kernel starts the session on it without a second
+            // `SetSessionModel` round trip.
+            handle
+                .spec
+                .model
+                .as_ref()
+                .map(|model| acp::ModelId::from(model.clone())),
         ),
-        None => (app.models.clone(), app.acp_tx.clone(), app.cwd.clone()),
+        None => (app.models.clone(), app.acp_tx.clone(), app.cwd.clone(), None),
     };
     let mut effects = Vec::new();
     reseed_tip_for_new_session(app);
@@ -573,7 +583,7 @@ pub(crate) fn dispatch_new_session_for_connection(
     effects.push(Effect::CreateSession {
         agent_id,
         cwd: workspace,
-        model_id: None,
+        model_id,
         permission_mode_override: None,
         preferred_session_id: Some(session_id),
         chat_kind: false,

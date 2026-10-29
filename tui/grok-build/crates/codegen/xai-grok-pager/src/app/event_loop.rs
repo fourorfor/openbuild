@@ -3671,7 +3671,29 @@ pub(crate) async fn run(
                 let connection = outcome.connection;
                 // The profile survives the spawn: it names the pane's private
                 // storage roots, so it must not be rebuilt from scratch here.
-                let spec = pending.spec;
+                let mut spec = pending.spec;
+                // Normalise the pinned model against *this* kernel's catalog.
+                // A catalog miss is reported and the half-open connection is
+                // dropped: a pane that silently runs the wrong model is worse
+                // than no pane at all.
+                if let Some(requested) = spec.model.clone() {
+                    match conn.models.resolve_by_name_or_id(&requested) {
+                        Some(id) => spec.model = Some(id.0.to_string()),
+                        None => {
+                            conn.cancel.cancel();
+                            push_pane_open_failure(
+                                &mut app,
+                                format!(
+                                    "Could not open pane '{}': unknown model '{requested}' for this kernel. \
+                                     Use /model in an existing pane to see the ids it offers.",
+                                    spec.display_label()
+                                ),
+                            );
+                            presenter.request(false);
+                            continue;
+                        }
+                    }
+                }
                 // Register the connection before any agent exists so
                 // `/backend` and request routing can already answer for it.
                 let handle = super::connections::ConnectionHandle::new(

@@ -55,9 +55,16 @@ impl SlashCommand for PaneCommand {
             }
             Some("open") => {
                 let label = parts.next().unwrap_or("secondary").to_string();
+                // Optional third token: the model this pane starts with. It is
+                // resolved against *this pane's* catalog after its kernel
+                // handshake, so an unknown name is a readable error instead of
+                // a pane that silently runs the kernel default.
+                let model = parts.next().map(str::to_string);
                 if parts.next().is_some() {
                     return CommandResult::Error(
-                        "/pane open takes at most one label: /pane open [label]".to_string(),
+                        "/pane open takes a label and an optional model: \
+                         /pane open [label] [provider/model]"
+                            .to_string(),
                     );
                 }
                 if !label
@@ -68,6 +75,13 @@ impl SlashCommand for PaneCommand {
                         "A pane label may only contain letters, digits, '-' and '_'.".to_string(),
                     );
                 }
+                if let Some(model) = model.as_deref()
+                    && (model.is_empty() || model.chars().any(char::is_whitespace))
+                {
+                    return CommandResult::Error(
+                        "A pane model must be a single token such as provider/model.".to_string(),
+                    );
+                }
                 // The second pane runs in the same workspace unless the caller
                 // supplied one; the profile's private storage roots are what
                 // actually have to differ for the session databases to stay
@@ -76,7 +90,7 @@ impl SlashCommand for PaneCommand {
                     .pane_workspace
                     .clone()
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                CommandResult::Action(Action::PaneOpen { label })
+                CommandResult::Action(Action::PaneOpen { label, model })
             }
             Some("close") => {
                 let label = parts.next().map(str::to_string);
@@ -118,8 +132,16 @@ fn workspace_hint(workspace: &std::path::Path) -> String {
 ///
 /// The label names the private storage roots; the workspace and model come from
 /// the caller so `/pane open` can be retargeted later without touching storage.
-pub fn profile_for_pane(label: &str, workspace: std::path::PathBuf) -> ProfileSpec {
-    ProfileSpec::new(label, workspace)
+/// `model` is the user's input, not a normalised id: the pane's own catalog only
+/// exists after its handshake, so resolution happens there.
+pub fn profile_for_pane(
+    label: &str,
+    workspace: std::path::PathBuf,
+    model: Option<String>,
+) -> ProfileSpec {
+    let mut spec = ProfileSpec::new(label, workspace);
+    spec.model = model;
+    spec
 }
 
 /// Width split helper re-exported for the renderer and tests.
@@ -230,6 +252,40 @@ mod tests {
     }
 
     #[test]
+    fn pane_open_keeps_an_optional_model() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut c = ctx(&models, &bundle);
+        match PaneCommand.run(&mut c, "open cheap deepseek/deepseek-chat") {
+            CommandResult::Action(Action::PaneOpen { label, model }) => {
+                assert_eq!(label, "cheap");
+                assert_eq!(model.as_deref(), Some("deepseek/deepseek-chat"));
+            }
+            other => panic!("expected a PaneOpen action, got {other:?}"),
+        }
+        // A label alone still means "the kernel default".
+        match PaneCommand.run(&mut c, "open plain") {
+            CommandResult::Action(Action::PaneOpen { model, .. }) => assert!(model.is_none()),
+            other => panic!("expected a PaneOpen action, got {other:?}"),
+        }
+        // Three positional arguments are a usage error, not a silent truncation.
+        assert!(matches!(
+            PaneCommand.run(&mut c, "open cheap model extra"),
+            CommandResult::Error(_)
+        ));
+    }
+
+    #[test]
+    fn profile_for_pane_carries_the_model() {
+        let spec = profile_for_pane("cheap", std::path::PathBuf::from("/w"), Some("m".into()));
+        assert_eq!(spec.model.as_deref(), Some("m"));
+        // The model participates in profile identity, so two panes pinned to
+        // different models are never treated as the same profile.
+        let other = profile_for_pane("cheap", std::path::PathBuf::from("/w"), None);
+        assert!(!spec.same_as(&other));
+    }
+
+    #[test]
     fn pane_open_rejects_unsafe_labels() {
         let models = ModelState::default();
         let bundle = BundleState::default();
@@ -238,9 +294,18 @@ mod tests {
             PaneCommand.run(&mut c, "open ../escape"),
             CommandResult::Error(_)
         ));
+        // The third positional slot is a model, so a fourth argument is the
+        // usage error now; `open a b` means "label a, model b".
+        assert!(matches!(
+            PaneCommand.run(&mut c, "open a b c"),
+            CommandResult::Error(_)
+        ));
         assert!(matches!(
             PaneCommand.run(&mut c, "open a b"),
-            CommandResult::Error(_)
+            CommandResult::Action(Action::PaneOpen {
+                model: Some(_),
+                ..
+            })
         ));
     }
 

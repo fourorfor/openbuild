@@ -340,12 +340,14 @@ pub enum Action {
     /// Restart the OpenBuild kernel and reload every open session (`/reconnect`).
     /// Distinct from the leader reconnect: this one re-spawns a dead child process.
     ReconnectKernel,
-    /// `/pane open <label>`: start a second kernel for a new profile and show it
-    /// beside the current pane.
+    /// `/pane open <label> [model]`: start a second kernel for a new profile and
+    /// show it beside the current pane.
     ///
     /// The spawn itself belongs to the event loop (it owns the ACP receivers and
-    /// the merged stream), so dispatch only records the request.
-    PaneOpen { label: String },
+    /// the merged stream), so dispatch only records the request. A `model` is
+    /// resolved against the new connection's own catalog, so it is stored as
+    /// user input here and normalised once that catalog is available.
+    PaneOpen { label: String, model: Option<String> },
     /// `/pane close [label]`: close a pane and stop its kernel.
     PaneClose { label: Option<String> },
     /// `/pane focus <left|right>` (or next): move the keyboard between panes.
