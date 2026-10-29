@@ -2199,7 +2199,9 @@ fn render_welcome_done(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("v{ver} available, press {key_name} to restart"),
+                    // Branded for this product: the version belongs to
+                    // OpenBuild's own channel, not the upstream grok one.
+                    xai_grok_update::openbuild_update::update_hint(ver, key_name),
                     Style::default().fg(theme.accent_user),
                 ),
             ]);

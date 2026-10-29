@@ -1278,14 +1278,12 @@ async fn run_agent_command(
             )
         );
         if should_check_for_updates(no_auto_update) {
-            auto_update::run_update_if_available(
-                auto_update::UpdateRunMode::NonBlocking,
-                false,
-                auto_update::CliUpdateTrigger::AutoBackground,
-                update_config,
-            )
-            .await
-            .ok();
+            // The interactive TUI shows the update hint and installs on Ctrl+U
+            // (see `bg_update_rx`). This non-TUI path must not start an
+            // upstream grok download, so it only records availability.
+            let channel = xai_grok_update::openbuild_update::channel_config();
+            let outcome = xai_grok_update::openbuild_update::check(&channel).await;
+            tracing::info!(?outcome, "OpenBuild update channel checked");
         }
     }
     let remote_settings = if had_prefetch {
@@ -1396,16 +1394,12 @@ async fn run_agent_command(
         should_check_for_updates(no_auto_update),
         managed_install,
     ) {
-        let update_config = update_config.clone();
         tokio::spawn(async move {
-            auto_update::run_update_if_available(
-                auto_update::UpdateRunMode::NonBlocking,
-                false,
-                auto_update::CliUpdateTrigger::AutoBackground,
-                &update_config,
-            )
-            .await
-            .ok();
+            // Same rule as the TUI: never download from the upstream grok
+            // channel. The installer owns the swap, so this only observes.
+            let channel = xai_grok_update::openbuild_update::channel_config();
+            let outcome = xai_grok_update::openbuild_update::check(&channel).await;
+            tracing::info!(?outcome, "OpenBuild update channel checked (stdio)");
         });
     } else if is_stdio && !use_leader && !managed_install {
         tracing::debug!("stdio auto-update skipped: not the managed install");
@@ -1627,41 +1621,35 @@ async fn run_agent_command(
                 tracing::info!("Leader auto-update disabled");
                 None
             } else {
-                let update_config_for_leader = update_config.clone();
                 Some(xai_grok_shell::agent::app::LeaderAutoUpdateConfig {
                     check_interval: std::time::Duration::from_secs(60 * 60),
                     check_fn: Box::new(move || {
-                        let uc = update_config_for_leader.clone();
                         Box::pin(async move {
                             let current_config = xai_grok_shell::util::config::load_config().await;
                             if current_config.cli.auto_update == Some(false) {
                                 return false;
                             }
-                            match auto_update::ensure_latest_on_disk(&uc).await {
-                                Ok(outcome) => {
-                                    if let Some(v) = &outcome.installed {
-                                        if let Err(e) =
-                                            xai_grok_cloud_config::managed_config::sync().await
-                                        {
-                                            tracing::warn!(
-                                                "Leader auto-update: managed config refresh failed: {e}"
-                                            );
-                                        }
-                                        tracing::info!(
-                                            "Leader auto-update: v{v} installed successfully"
-                                        );
-                                    } else if outcome.relaunch_needed {
-                                        tracing::info!(
-                                            "Leader auto-update: newer binary already on disk, \
-                                             relaunching without download"
-                                        );
-                                    }
-                                    outcome.relaunch_needed
+                            // Leader nodes only report; installing from a
+                            // background timer would swap binaries under a
+                            // live session, so it is left to the user.
+                            let channel =
+                                xai_grok_update::openbuild_update::channel_config();
+                            let outcome =
+                                xai_grok_update::openbuild_update::check(&channel).await;
+                            match outcome {
+                                xai_grok_update::openbuild_update::CheckOutcome::Available {
+                                    latest,
+                                } => {
+                                    tracing::info!(
+                                        %latest,
+                                        "Leader auto-update: OpenBuild update available"
+                                    );
+                                    true
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Leader auto-update: check/download failed, \
-                                         staying alive: {e:#}"
+                                other => {
+                                    tracing::debug!(
+                                        ?other,
+                                        "Leader auto-update: no OpenBuild update"
                                     );
                                     false
                                 }
@@ -2506,21 +2494,33 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     }
     enforce_version_policy_or_exit();
     let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-    type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
-    let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let check_updates = should_check_for_updates(args.no_auto_update);
     let bg_update_rx: Option<tokio::sync::oneshot::Receiver<Option<auto_update::UpdateAvailable>>> =
         if check_updates {
-            let update_config = update_config.clone();
-            let wait_slot = bg_update_wait.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
-                let check = auto_update::check_update_background(&update_config).await;
-                if let Some(mut child) = check.download {
-                    *wait_slot.lock().await = Some(tokio::spawn(async move { child.wait().await }));
-                }
-                let _ = tx.send(check.update);
+                // Only the OpenBuild channel is consulted. Nothing is downloaded
+                // here: the installer owns the swap, so this just decides whether
+                // to show the restart hint.
+                let channel = xai_grok_update::openbuild_update::channel_config();
+                let update = match xai_grok_update::openbuild_update::check(&channel).await {
+                    xai_grok_update::openbuild_update::CheckOutcome::Available { latest } => {
+                        tracing::info!(%latest, "OpenBuild update channel: newer version available");
+                        Some(auto_update::UpdateAvailable {
+                            latest_version: latest,
+                        })
+                    }
+                    xai_grok_update::openbuild_update::CheckOutcome::UpToDate { latest } => {
+                        tracing::debug!(%latest, "OpenBuild update channel: up to date");
+                        None
+                    }
+                    xai_grok_update::openbuild_update::CheckOutcome::Unavailable(reason) => {
+                        tracing::warn!(%reason, "OpenBuild update channel: check failed");
+                        None
+                    }
+                    xai_grok_update::openbuild_update::CheckOutcome::Disabled => None,
+                };
+                let _ = tx.send(update);
             });
             Some(rx)
         } else {
@@ -2530,12 +2530,37 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     xai_grok_sandbox::flush();
     match result {
         Ok(true) => {
-            let adopted = bg_update_wait.lock().await.take();
-            let grok = "grok";
-            if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("Update installed. Run `{grok}` to start.");
+            // Ctrl+U on the update hint. The channel was already resolved when
+            // the hint was shown; re-resolve so a config edit in another window
+            // still applies, and install through the OpenBuild installer.
+            let channel = xai_grok_update::openbuild_update::channel_config();
+            let installed = match xai_grok_update::openbuild_update::check(&channel).await {
+                xai_grok_update::openbuild_update::CheckOutcome::Available { latest } => {
+                    match xai_grok_update::openbuild_update::install(&channel, &latest).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            eprintln!("Update failed: {e:#}");
+                            false
+                        }
+                    }
+                }
+                xai_grok_update::openbuild_update::CheckOutcome::UpToDate { .. } => true,
+                xai_grok_update::openbuild_update::CheckOutcome::Unavailable(reason) => {
+                    eprintln!("Update check failed: {reason}");
+                    false
+                }
+                xai_grok_update::openbuild_update::CheckOutcome::Disabled => {
+                    eprintln!(
+                        "No OpenBuild update channel is configured.\n\
+                         Set [update] base in your config, or OPENBUILD_UPDATE_BASE."
+                    );
+                    false
+                }
+            };
+            if installed {
+                eprintln!("Update installed. Run `openbuild` to start.");
             } else {
-                eprintln!("Update did not complete. Run `{grok} update` to retry.");
+                eprintln!("Update did not complete.");
             }
             Ok(())
         }
@@ -2543,49 +2568,10 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         Err(e) => Err(e),
     }
 }
-/// Returns `true` when an update path completed without a reported failure. It falls back to a fresh blocking `grok
-/// update` only when there is no waiter or the child failed. (No waiter means the spawn failed or no download was
-/// needed because the target was already on disk.).
-#[tracing::instrument(level = "debug", skip_all)]
-async fn finish_update_on_exit(
-    adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
-    update_config: &UpdateConfig,
-) -> bool {
-    let run_blocking = |reason: Option<String>| async move {
-        if let Some(reason) = reason {
-            eprintln!("{reason}");
-        }
-        run_update_blocking(update_config).await
-    };
-    match adopted {
-        Some(handle) => {
-            eprintln!("Waiting for the update download to finish...");
-            match handle.await {
-                Ok(Ok(status)) if status.success() => true,
-                Ok(Ok(status)) => {
-                    run_blocking(Some(format!(
-                        "Background update exited with {status}; retrying..."
-                    )))
-                    .await
-                }
-                Ok(Err(e)) => {
-                    run_blocking(Some(format!(
-                        "Could not wait for the background update ({e}); retrying..."
-                    )))
-                    .await
-                }
-                Err(join_err) => {
-                    run_blocking(Some(format!(
-                        "Background update waiter failed ({join_err}); retrying..."
-                    )))
-                    .await
-                }
-            }
-        }
-        None => run_blocking(None).await,
-    }
-}
 /// Build an [`UpdateConfig`] from the current environment and config files.
+///
+/// Only the upstream CLI still receives this (its own CLI surface); OpenBuild's
+/// update channel does not read it.
 fn build_update_config() -> UpdateConfig {
     let environment = xai_grok_shell::env::GrokBuildEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
@@ -2605,24 +2591,20 @@ fn build_update_config() -> UpdateConfig {
     }
     config
 }
-/// Ctrl+U quit-for-update: the user asked for this install. `run_update_if_available` reports its
-/// own failures to stderr; only a hard Err counts as "did not complete".
-async fn run_update_blocking(update_config: &UpdateConfig) -> bool {
-    auto_update::run_update_if_available(
-        auto_update::UpdateRunMode::Blocking,
-        false,
-        auto_update::CliUpdateTrigger::UserCommand,
-        update_config,
-    )
-    .await
-    .is_ok()
-}
-/// Central gate for auto-update checks; add new suppression rules here, not at call sites.
+/// Central gate for update checks.
+///
+/// OpenBuild has its own channel and never consults the upstream grok one: the
+/// grok channel advertises grok versions and installing from it replaces
+/// `~/.grok/bin/grok.exe`, a different application. With no channel configured
+/// there is nothing to check, so every path stays silent.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if cfg!(debug_assertions) {
         return false;
     }
-    !is_opted_out_of_updates(no_auto_update_flag)
+    if is_opted_out_of_updates(no_auto_update_flag) {
+        return false;
+    }
+    xai_grok_update::openbuild_update::is_configured()
 }
 fn is_opted_out_of_updates(no_auto_update_flag: bool) -> bool {
     no_auto_update_flag
@@ -2694,53 +2676,147 @@ async fn run_update_command(
     trigger: auto_update::CliUpdateTrigger,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
+    // `trigger` and `base_update_config` belong to the upstream updater. They
+    // are still accepted so the CLI surface is unchanged, but OpenBuild's
+    // channel is the only thing this command may touch.
+    let _ = (trigger, base_update_config);
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
-    let mut update_config = base_update_config.clone();
-    if check {
-        if version.is_some() {
-            anyhow::bail!("--version cannot be used with --check");
-        }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
-        auto_update::print_update_status(&status, json)?;
-        return Ok(());
-    }
+    let _ = force_reinstall;
     if let Some(ref v) = version
         && semver::Version::parse(v).is_err()
     {
         anyhow::bail!(
-            "'{}' is not a valid version. Expected semver like 0.1.150",
+            "'{}' is not a valid version. Expected semver like 1.0.45",
             v
         );
     }
-    let telemetry_cfg = xai_grok_shell::config::load_agent_config_disk_only()
-        .map_err(|e| tracing::warn!("grok update: telemetry init skipped (agent config: {e})"))
-        .ok();
-    if let Some(agent_cfg) = telemetry_cfg {
-        let auth_manager =
-            std::sync::Arc::new(xai_grok_login::AuthManager::new_with_proxy_base_url(
-                &xai_grok_shell::util::grok_home::grok_home(),
-                agent_cfg.grok_com_config.clone(),
-                agent_cfg.endpoints.proxy_url(),
-            ));
-        xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
+    let channel = xai_grok_update::openbuild_update::channel_config();
+    if let Some(switched) = channel_switch {
+        eprintln!(
+            "Channel switching applies to the upstream grok channel, which OpenBuild does not use. \
+             Set [update] channel = \"{switched}\" instead."
+        );
     }
-    let result = auto_update::run_update(
-        force_reinstall,
-        version.as_deref(),
-        channel_switch,
-        &mut update_config,
-        trigger,
-    )
-    .await;
-    if let Ok(Some(installed_version)) = &result {
-        signal_leaders_to_relaunch(installed_version).await;
+
+    if !channel.is_configured() {
+        if check {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "configured": false,
+                        "currentVersion": xai_grok_version::full_version(),
+                        "latestVersion": null,
+                        "updateAvailable": false,
+                    })
+                );
+            } else {
+                println!(
+                    "OpenBuild {} - no update channel configured",
+                    xai_grok_version::full_version()
+                );
+                println!(
+                    "Set [update] base in your config, or OPENBUILD_UPDATE_BASE, to enable updates."
+                );
+            }
+            return Ok(());
+        }
+        anyhow::bail!(
+            "no OpenBuild update channel is configured; set [update] base in your config, \
+             or OPENBUILD_UPDATE_BASE"
+        );
     }
-    xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
-        .await;
-    result?;
+
+    let outcome = xai_grok_update::openbuild_update::check(&channel).await;
+    if check {
+        match &outcome {
+            xai_grok_update::openbuild_update::CheckOutcome::Available { latest } => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "configured": true,
+                            "currentVersion": xai_grok_version::full_version(),
+                            "latestVersion": latest,
+                            "updateAvailable": true,
+                        })
+                    );
+                } else {
+                    println!(
+                        "OpenBuild - v{} (latest: {latest})",
+                        xai_grok_version::full_version()
+                    );
+                }
+            }
+            xai_grok_update::openbuild_update::CheckOutcome::UpToDate { latest } => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "configured": true,
+                            "currentVersion": xai_grok_version::full_version(),
+                            "latestVersion": latest,
+                            "updateAvailable": false,
+                        })
+                    );
+                } else {
+                    println!(
+                        "OpenBuild - v{} (latest: {latest}) - already up to date",
+                        xai_grok_version::full_version()
+                    );
+                }
+            }
+            xai_grok_update::openbuild_update::CheckOutcome::Unavailable(reason) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "configured": true,
+                            "currentVersion": xai_grok_version::full_version(),
+                            "latestVersion": null,
+                            "updateAvailable": false,
+                            "error": reason,
+                        })
+                    );
+                } else {
+                    println!("OpenBuild update check failed: {reason}");
+                }
+            }
+            xai_grok_update::openbuild_update::CheckOutcome::Disabled => {
+                anyhow::bail!("no OpenBuild update channel is configured");
+            }
+        }
+        return Ok(());
+    }
+
+    let target = match outcome {
+        xai_grok_update::openbuild_update::CheckOutcome::Available { latest } => latest,
+        xai_grok_update::openbuild_update::CheckOutcome::UpToDate { latest } => {
+            println!("Already up to date (OpenBuild v{latest}).");
+            return Ok(());
+        }
+        xai_grok_update::openbuild_update::CheckOutcome::Unavailable(reason) => {
+            anyhow::bail!("OpenBuild update check failed: {reason}");
+        }
+        xai_grok_update::openbuild_update::CheckOutcome::Disabled => {
+            anyhow::bail!("no OpenBuild update channel is configured");
+        }
+    };
+    // A pinned --version must match the pointer: the installer fetches the
+    // artifact for the version it is handed, and silently installing a
+    // different one than requested would be worse than failing.
+    if let Some(ref pinned) = version
+        && pinned != &target
+    {
+        anyhow::bail!(
+            "requested version {pinned} but the channel publishes {target}; \
+             pass the published version or omit --version"
+        );
+    }
+    xai_grok_update::openbuild_update::install(&channel, &target).await?;
+    println!("Installed OpenBuild v{target}. Run `openbuild` to start.");
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that is older than `installed_version`

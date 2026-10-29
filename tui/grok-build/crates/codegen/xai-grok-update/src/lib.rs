@@ -8,6 +8,8 @@
 #![deny(clippy::indexing_slicing)]
 pub mod auto_update;
 mod cleanup_downloads;
+/// OpenBuild's own update channel; the upstream grok channel is disabled.
+pub mod openbuild_update;
 pub mod version;
 mod version_policy;
 mod winget;

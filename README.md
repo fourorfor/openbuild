@@ -48,8 +48,8 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ### 品牌覆盖范围
 
 `OpenBuild` 出现在所有用户可见的位置：CLI 的 `--version` / `--help` / `version`、
-欢迎页、隐私横幅、设置弹窗、通知标题、`doctor` 报告、`update` 提示、权限弹窗标题、
-`/backend` 输出。
+欢迎页、隐私横幅、设置弹窗、通知标题、`doctor` 报告、更新提示与更新通道输出、
+权限弹窗标题、`/backend` 输出。
 
 **故意保留上游拼写**的地方（改动会破坏兼容性）：
 
@@ -109,11 +109,32 @@ $env:OPENBUILD_KERNEL  = "<repo>\dist\openbuild-kernel.exe"
 ```powershell
 .\install.ps1              # 构建 + 安装
 .\install.ps1 -SkipBuild   # 直接安装 dist\ 里现有的产物
+.\install.ps1 -Update      # 从更新通道下载并安装（TUI 的 Ctrl+U 走这条）
 ```
 
 安装到 `%LOCALAPPDATA%\OpenBuild`，并把该目录加入用户 PATH，之后任意终端里
 直接敲 `openbuild` 即可。内核与 TUI 放在同一目录，TUI 会自己找到它，
 不再需要设置 `OPENBUILD_KERNEL`。
+
+### 更新
+
+OpenBuild 用**自己的**更新通道，不查上游 grok 的（那条会装成 grok 并覆盖
+`~/.grok/bin/grok.exe`）。通道默认**未配置即静默**：没有提示、不发请求。
+
+```
+[update]
+base = "https://updates.example.com/openbuild"   # 版本指针：{base}/{channel}
+channel = "stable"
+install_script = "C:/OpenBuild/install.ps1"      # 实际执行安装的脚本
+```
+
+也可用 `OPENBUILD_UPDATE_BASE` / `OPENBUILD_UPDATE_CHANNEL` /
+`OPENBUILD_INSTALL_SCRIPT` 覆盖。命令行：
+
+```powershell
+openbuild update --check     # 只查是否有新版本
+openbuild update             # 下载并安装
+```
 
 ### 只验证内核
 

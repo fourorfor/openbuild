@@ -458,7 +458,7 @@ pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &s
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.scrollback.push_block(RenderBlock::system(format!(
-            "Update available: v{latest_version}. Restart to apply."
+            "OpenBuild update available: v{latest_version}. Restart to apply."
         )));
     }
 }
