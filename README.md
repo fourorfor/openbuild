@@ -45,7 +45,7 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 | M5 | 内核崩溃可见且可恢复：`health` 模块归集退出原因与 stderr，事件循环推系统块（退出码 + stderr 尾部），`/reconnect` 重启内核并对每个会话 `session/load` 重放；`/backend` 显示后端类型、内核路径与已声明能力 |
 | M6-D | `adapter/child.rs` 把内核子会话事件展开成 grok 的 `subagent_spawned` / `subagent_finished` 与按子会话 `sessionId` 重投递的更新，复用现有 `subagent_takeover` |
 | M6-F | `openbuild-server` crate：把内核作为 ACP agent 暴露给 Zed/Neovim 的 stdio 中继；`build.ps1` / `install.ps1` 已纳入 |
-| M6-G | HTTP 直连侧通道：ACP 之外只读订阅 `session.tool.progress` / `session.diff` / 完整 usage；`/backend` 显示连接状态、事件数与最近事件 |
+| M6-G | HTTP 直连侧通道：ACP 之外只读订阅 `session.tool.progress` / `session.usage.updated`；diff 另走 `GET /api/session/:id/diff`（`session.diff` 不是 SSE 事件）；`/backend` 显示连接状态、事件数与最近事件 |
 | 品牌 | 全部用户可见名称统一走 `branding` 模块（`OpenBuild`）；crate 名、环境变量与 `~/.grok` 路径保持上游拼写 |
 
 ### 品牌覆盖范围
@@ -178,12 +178,19 @@ cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kerne
 同一份输出还会显示 HTTP 直连侧通道的状态，例如：
 
 ```text
-HTTP feed: connected (128 events, 0 dropped, 0 reconnects, last: session.diff)
+HTTP feed: connected (128 events, 0 dropped, 0 reconnects, last: session.tool.progress)
 ```
 
 它连接的是 ACP 内核正在使用的那个 `serve` 进程，只读订阅 `/api/event`，
-用来补上 ACP 不携带的 `session.tool.progress`、`session.diff` 与完整 usage。
+用来补上 ACP 不携带的 `session.tool.progress` 与 `session.usage.updated`。
 连接失败只会让这行显示 `stopped` / `reconnecting`，不影响对话主链路。
+
+> **`session.diff` 不在这个流上。** 它只定义在 `packages/schema/src/v1/session.ts`
+> （`SessionV1.Event.Definitions`），没有进入 `EventManifest.ServerDefinitions`，
+> 内核也没有任何 publisher，所以 `/api/event` 永远不会下发它。
+> 要拿每轮的文件 diff，必须按需请求
+> `GET /api/session/:sessionID/diff?context=N`（返回 `FileDiff.Info[]`）。
+> `session.usage.recorded`（durable 旧形态）同理不在流上，只有 `session.usage.updated` 在。
 
 ## 双内核并排（`/pane`）
 
@@ -435,11 +442,14 @@ OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍
 
 以下功能已有设计但**尚未落地**，不要按已交付能力使用：
 
-- **G 的 UI 消费**：`session.diff` 的 diff 视图与完整 usage 的用量面板。
-- **E 的后续打磨**：分割比例快捷键、按 profile 固定初始模型、支持多于两个 pane。E2 双内核本身已交付（`/pane`）。
+- **E 的后续打磨**（下一步）：分割比例入口、按 profile 固定初始模型、支持多于两个 pane。
+  E2 双内核本身已交付（`/pane`）。
+- **G 的 UI 消费**（下一步）：diff 视图与内核 token 用量面板。
+  注意 `session.diff` **不在** HTTP feed 上，必须走 `GET /api/session/:id/diff`。
 - **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v1.1 的其余项已完成。
 
-完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)。
+完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)，
+逐步实施方案见 [`docs/openbuild-handoff-e2-polish-g.md`](../docs/openbuild-handoff-e2-polish-g.md)。
 
 ## 许可证
 
