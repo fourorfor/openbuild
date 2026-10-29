@@ -814,6 +814,24 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             push_pane_notice(app, crate::slash::commands::pane_report(app));
             vec![]
         }
+        Action::PaneSplit { percent } => {
+            if !app.pane_layout.is_split() {
+                push_pane_notice(
+                    app,
+                    "Only one pane is open, so there is nothing to split. Start a comparison with /pane open."
+                        .to_string(),
+                );
+                return vec![];
+            }
+            if let Some(percent) = percent {
+                app.pane_layout.split_percent = percent;
+            }
+            push_pane_notice(
+                app,
+                crate::slash::commands::pane_layout_line(&app.pane_layout, 80),
+            );
+            vec![]
+        }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
             vec![]

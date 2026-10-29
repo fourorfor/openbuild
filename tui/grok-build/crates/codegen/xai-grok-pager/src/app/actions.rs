@@ -350,6 +350,11 @@ pub enum Action {
     PaneClose { label: Option<String> },
     /// `/pane focus <left|right>` (or next): move the keyboard between panes.
     PaneFocus { target: Option<String> },
+    /// `/pane split [pct]`: set the right pane's width percentage.
+    ///
+    /// `Some(0)` restores the even split, `Some(1..=99)` sets a fixed ratio,
+    /// `None` only reports the current layout.
+    PaneSplit { percent: Option<u16> },
     /// `/pane list`: report the open panes and their profiles.
     PaneList,
     /// Copy selected block's content to clipboard.

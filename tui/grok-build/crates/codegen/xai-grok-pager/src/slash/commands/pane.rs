@@ -21,13 +21,38 @@ impl SlashCommand for PaneCommand {
     slash_meta! {
         name: "pane",
         description: "Run a second kernel beside this one (panes, profiles, focus)",
-        usage: "/pane [list|open [label]|close [label]|focus [left|right|next]]",
+        usage: "/pane [list|open [label]|close [label]|focus [left|right|next]|split [pct]]",
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let mut parts = args.split_whitespace();
         match parts.next() {
             None | Some("list") => CommandResult::Action(Action::PaneList),
+            Some("split") => {
+                let raw = parts.next();
+                if parts.next().is_some() {
+                    return CommandResult::Error(
+                        "/pane split takes at most one percentage: /pane split [0-99]".to_string(),
+                    );
+                }
+                let percent = match raw {
+                    // No argument reports the current ratio instead of guessing one.
+                    None => return CommandResult::Action(Action::PaneSplit { percent: None }),
+                    Some(value) => match value.parse::<u16>() {
+                        Ok(percent) if percent <= 99 => percent,
+                        _ => {
+                            return CommandResult::Error(
+                                "The split percentage must be a whole number from 0 to 99 \
+                                 (0 restores the even split)."
+                                    .to_string(),
+                            );
+                        }
+                    },
+                };
+                CommandResult::Action(Action::PaneSplit {
+                    percent: Some(percent),
+                })
+            }
             Some("open") => {
                 let label = parts.next().unwrap_or("secondary").to_string();
                 if parts.next().is_some() {
@@ -132,14 +157,34 @@ pub fn pane_report(app: &crate::app::app_view::AppView) -> String {
         }
     }
     if app.pane_layout.is_split() {
-        let (left, right) = PaneLayout::split_widths(80);
-        lines.push(format!(
-            "Layout: two panes side by side ({left}/{right} columns at 80 wide). /pane focus next moves the keyboard."
-        ));
+        lines.push(pane_layout_line(&app.pane_layout, 80));
     } else {
         lines.push("Layout: single pane. /pane open starts a second kernel.".to_string());
     }
     lines.join("\n")
+}
+
+/// The `Layout:` line: the real ratio and the actual column widths.
+///
+/// A hard-coded `split_widths(80)` used to be reported here, so `/pane list`
+/// kept claiming 40/40 after `/pane split 30`. The width argument only affects
+/// the column counts in the text; the ratio comes from the layout itself.
+pub fn pane_layout_line(layout: &PaneLayout, width: u16) -> String {
+    if !layout.is_split() {
+        return "Layout: single pane. /pane open starts a second kernel.".to_string();
+    }
+    let (left, right) = PaneLayout::split_widths_with(width, layout.split_percent);
+    let total = u32::from(left) + u32::from(right);
+    let left_percent = if total == 0 {
+        50
+    } else {
+        (u32::from(left) * 100 + total / 2) / total
+    };
+    format!(
+        "Layout: two panes side by side ({left_percent}/{right_percent} at {width} columns wide \
+         → {left}+{right}). /pane split <pct> sets the right column, /pane split 0 restores even.",
+        right_percent = 100 - left_percent,
+    )
 }
 
 #[cfg(test)]
@@ -246,5 +291,62 @@ mod tests {
     fn split_widths_delegate_to_the_layout() {
         assert_eq!(pane_split_widths(80, 0), (40, 40));
         assert_eq!(pane_split_widths(100, 25), (75, 25));
+    }
+
+    #[test]
+    fn pane_split_accepts_a_percentage_or_nothing() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut c = ctx(&models, &bundle);
+        assert!(matches!(
+            PaneCommand.run(&mut c, "split 30"),
+            CommandResult::Action(Action::PaneSplit {
+                percent: Some(30)
+            })
+        ));
+        // Bare `/pane split` only reports the current ratio.
+        assert!(matches!(
+            PaneCommand.run(&mut c, "split"),
+            CommandResult::Action(Action::PaneSplit { percent: None })
+        ));
+        // `0` is the documented "back to even" value.
+        assert!(matches!(
+            PaneCommand.run(&mut c, "split 0"),
+            CommandResult::Action(Action::PaneSplit { percent: Some(0) })
+        ));
+    }
+
+    #[test]
+    fn pane_split_rejects_out_of_range_and_junk() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut c = ctx(&models, &bundle);
+        for bad in ["split 100", "split 1000", "split abc", "split 30 40", "split -5"] {
+            assert!(
+                matches!(PaneCommand.run(&mut c, bad), CommandResult::Error(_)),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_line_reports_the_real_ratio() {
+        let mut layout = PaneLayout::default();
+        layout.open(crate::app::agent::AgentId(1));
+        layout.open(crate::app::agent::AgentId(2));
+
+        let even = pane_layout_line(&layout, 100);
+        assert!(even.contains("50/50"), "{even}");
+        assert!(even.contains("50+50"), "{even}");
+
+        layout.split_percent = 30;
+        let narrow = pane_layout_line(&layout, 100);
+        assert!(narrow.contains("70/30"), "{narrow}");
+        assert!(narrow.contains("70+30"), "{narrow}");
+
+        // A single pane reports that there is nothing to split.
+        let mut single = PaneLayout::default();
+        single.open(crate::app::agent::AgentId(1));
+        assert!(pane_layout_line(&single, 100).contains("single pane"));
     }
 }

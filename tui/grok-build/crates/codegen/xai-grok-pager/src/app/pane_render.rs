@@ -239,4 +239,16 @@ mod tests {
         assert_eq!(pane_at(&layout, area, 39, 1), Some(AgentId(1)));
         assert_eq!(pane_at(&layout, area, 40, 1), Some(AgentId(2)));
     }
+
+    /// `/pane split 30` must move the divider for both painting and hit-testing:
+    /// they share `split_widths_with`, so the click at column 71 is the right
+    /// pane and column 69 is still the left one.
+    #[test]
+    fn an_explicit_ratio_moves_the_divider_for_hits() {
+        let mut layout = layout();
+        layout.split_percent = 30;
+        let area = Rect::new(0, 0, 100, 24);
+        assert_eq!(pane_at(&layout, area, 69, 5), Some(AgentId(1)));
+        assert_eq!(pane_at(&layout, area, 71, 5), Some(AgentId(2)));
+    }
 }

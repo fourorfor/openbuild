@@ -42,7 +42,7 @@ pub mod memory;
 pub mod memory_ops;
 pub mod model;
 pub mod pane;
-pub use pane::pane_report;
+pub use pane::{pane_layout_line, pane_report};
 pub mod multiline;
 pub mod new;
 pub mod personas;
