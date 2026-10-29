@@ -1466,6 +1466,23 @@ impl FeedMux {
     }
 }
 
+/// Key under which one shell page poll is tracked as in flight.
+fn progress_result_key(result: &TaskResult) -> Option<(crate::app::agent::AgentId, String)> {
+    match result {
+        TaskResult::ToolProgressOutput {
+            agent_id,
+            tool_call_id,
+            ..
+        }
+        | TaskResult::ToolProgressOutputFailed {
+            agent_id,
+            tool_call_id,
+            ..
+        } => Some((*agent_id, tool_call_id.clone())),
+        _ => None,
+    }
+}
+
 /// Wait for one event from the merged HTTP side channel.
 ///
 /// An empty mux parks the future forever so `select!` can keep the branch
@@ -1522,6 +1539,40 @@ pub(crate) fn handle_feed_event(
                     session = session_id,
                     "usage event for an unknown session"
                 );
+            }
+        }
+        // Real-time tool state. Display-only: the block's terminal state and
+        // final output still come from ACP. The metadata shape is per-tool, so
+        // the raw payload is logged once per event to keep the real field names
+        // inspectable (`shellID`, `sessionID`+`status`, `provider`, `toolCalls`).
+        "session.tool.progress" => {
+            let data = value.get("data").unwrap_or(value);
+            let Some(event) = crate::app::tool_progress::ToolProgressEvent::from_event(data)
+            else {
+                return;
+            };
+            tracing::info!(
+                slot,
+                session = data.get("sessionID").and_then(|v| v.as_str()).unwrap_or("-"),
+                assistant_message_id = %event.assistant_message_id,
+                tool_call_id = %event.tool_call_id,
+                kind = event.kind().label(),
+                metadata = %event.metadata,
+                "session.tool.progress"
+            );
+            crate::app::tool_progress::publish_last_in(slot, Some(event.summary()));
+            // Route by session id, like usage: a pane may hold several agents.
+            let Some(session_id) = data.get("sessionID").and_then(|v| v.as_str()) else {
+                return;
+            };
+            if let Some(agent) = app.agents.values_mut().find(|agent| {
+                agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == session_id)
+            }) {
+                agent.tool_progress.note(event);
             }
         }
         _ => {}
@@ -2413,6 +2464,12 @@ pub(crate) async fn run(
         status_line_refresh_interval.map(|interval| Instant::now() + interval);
     const GATE_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut gate_poll_at: Option<Instant> = None;
+    /// How often a running shell's captured output is paged. `session.tool.progress`
+    /// names the shell; the bytes come from `GET /api/shell/:id/output`.
+    const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(400);
+    let mut progress_poll_at: Option<Instant> = None;
+    let mut progress_in_flight: std::collections::HashSet<(crate::app::agent::AgentId, String)> =
+        std::collections::HashSet::new();
     let mut subscription_watch_at: Option<Instant> = if app.subscription_watch_wanted() {
         app.subscription_watch_interval()
             .map(|iv| Instant::now() + iv)
@@ -2901,6 +2958,12 @@ pub(crate) async fn run(
                 None => std::future::pending().await,
             }
         };
+        let progress_poll = async {
+            match progress_poll_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         let subscription_watch = async {
             match subscription_watch_at {
                 Some(at) => sleep_until(at).await,
@@ -3255,6 +3318,11 @@ pub(crate) async fn run(
                     if kind == "session.usage.updated" {
                         presenter.request(false);
                     }
+                    // A running tool now has a shell to page; start the poll that
+                    // pulls its captured bytes.
+                    if kind == "session.tool.progress" && progress_poll_at.is_none() {
+                        progress_poll_at = Some(Instant::now() + PROGRESS_POLL_INTERVAL);
+                    }
                 } else {
                     // Shutdown or a fatal stream error. The TUI keeps running;
                     // `/backend` reports the stopped feed for that slot.
@@ -3285,9 +3353,15 @@ pub(crate) async fn run(
                         ) else {
                             continue;
                         };
+                        let progress_key = progress_result_key(&result);
                         let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
                         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                             break;
+                        }
+                        // A finished (or failed) shell page frees its in-flight
+                        // slot so the next tick can page the next chunk.
+                        if let Some(key) = progress_key {
+                            progress_in_flight.remove(&key);
                         }
                         after_task_complete_dispatch(
                             &app,
@@ -3442,6 +3516,57 @@ pub(crate) async fn run(
                 }
                 if !app.has_access() {
                     gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
+                }
+            }
+
+            _ = progress_poll => {
+                // `session.tool.progress` names the shell; its bytes live behind
+                // `GET /api/shell/:id/output`, paged by byte cursor. One request
+                // per running shell, spawned so the round trip never blocks the
+                // `select!`. ACP still owns the tool's terminal state.
+                progress_poll_at = None;
+                let mut pending = 0usize;
+                for (agent_id, agent) in app.agents.iter() {
+                    let targets = agent.tool_progress.shell_targets();
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    let Some(client) = app
+                        .connections
+                        .get(&app.connection_of(*agent_id))
+                        .and_then(|handle| handle.http_feed.as_ref())
+                        .map(|feed| feed.client_handle())
+                    else {
+                        continue;
+                    };
+                    pending += targets.len();
+                    for target in targets {
+                        if !progress_in_flight.insert((*agent_id, target.tool_call_id.clone())) {
+                            continue;
+                        }
+                        let agent_id = *agent_id;
+                        let client = client.clone();
+                        tasks.spawn(async move {
+                            let outcome = client
+                                .shell_output(&target.shell_id, target.cursor)
+                                .await;
+                            match outcome {
+                                Ok(page) => TaskResult::ToolProgressOutput {
+                                    agent_id,
+                                    tool_call_id: target.tool_call_id,
+                                    page,
+                                },
+                                Err(error) => TaskResult::ToolProgressOutputFailed {
+                                    agent_id,
+                                    tool_call_id: target.tool_call_id,
+                                    error: error.to_string(),
+                                },
+                            }
+                        });
+                    }
+                }
+                if pending > 0 {
+                    progress_poll_at = Some(Instant::now() + PROGRESS_POLL_INTERVAL);
                 }
             }
 

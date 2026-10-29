@@ -60,6 +60,9 @@ pub fn report_for_slot(slot: crate::app::connections::ConnectionId) -> Option<St
     lines.extend(feed_lines(openbuild_backend::http_feed::active_status_in(
         slot.0,
     )));
+    if let Some(progress) = crate::app::tool_progress::last_in(slot.0) {
+        lines.push(format!("Tool progress: {progress}"));
+    }
     Some(lines.join("\n"))
 }
 
@@ -125,6 +128,9 @@ pub fn report() -> String {
         if let Some(error) = status.last_error.as_deref() {
             lines.push(format!("HTTP feed error: {error}"));
         }
+    }
+    if let Some(progress) = crate::app::tool_progress::last_in(0) {
+        lines.push(format!("Tool progress: {progress}"));
     }
     lines.join("\n")
 }

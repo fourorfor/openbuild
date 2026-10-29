@@ -45,6 +45,7 @@ use super::settings::ui::{apply_setting_rollback, refresh_open_settings_modals};
 use super::status::{
     handle_coding_data_sharing_failed, handle_coding_data_sharing_updated,
     handle_context_info_complete, handle_session_diff_complete, handle_session_diff_failed,
+    handle_tool_progress_output, handle_tool_progress_output_failed,
     handle_session_usage_result, toast_persist_failure, usage_modal_state_mut,
 };
 use super::transcript::{
@@ -1706,6 +1707,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_id,
             error,
         } => handle_session_diff_failed(app, agent_id, &session_id, error),
+        TaskResult::ToolProgressOutput {
+            agent_id,
+            tool_call_id,
+            page,
+        } => handle_tool_progress_output(app, agent_id, &tool_call_id, page),
+        TaskResult::ToolProgressOutputFailed {
+            agent_id,
+            tool_call_id,
+            error,
+        } => handle_tool_progress_output_failed(app, agent_id, &tool_call_id, &error),
         TaskResult::FeedbackComplete {
             agent_id,
             origin,

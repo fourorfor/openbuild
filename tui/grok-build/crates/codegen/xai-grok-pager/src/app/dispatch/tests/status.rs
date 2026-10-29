@@ -2255,3 +2255,158 @@ fn edit_block_count(agent: &AgentView) -> usize {
         })
         .count()
 }
+
+/// Register a running Execute call the way ACP does, so progress has a block
+/// to paint into.
+fn running_execute(app: &mut AppView, tool_call_id: &str) {
+    use crate::acp::meta::NotificationMeta;
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let meta = NotificationMeta::default();
+    let call = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(acp::ToolCallId::new(tool_call_id), "cargo build".to_string())
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .locations(vec![]),
+    );
+    let (session, scrollback) = (&mut agent.session, &mut agent.scrollback);
+    session.handle_update(call, &meta, scrollback);
+    let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(tool_call_id),
+        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::InProgress)),
+    ));
+    let (session, scrollback) = (&mut agent.session, &mut agent.scrollback);
+    session.handle_update(update, &meta, scrollback);
+}
+
+/// A running shell's page lands in its execute block.
+#[test]
+fn tool_progress_output_lands_in_the_running_execute_block() {
+    let mut app = test_app_with_agent();
+    running_execute(&mut app, "tc-shell");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .tool_progress
+            .note(crate::app::tool_progress::ToolProgressEvent {
+                assistant_message_id: "msg_1".to_string(),
+                tool_call_id: "tc-shell".to_string(),
+                metadata: serde_json::json!({ "shellID": "sh_1" }),
+            });
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::ToolProgressOutput {
+            agent_id: AgentId(0),
+            tool_call_id: "tc-shell".to_string(),
+            page: openbuild_backend::http_feed::ShellOutputPage {
+                output: "Compiling\n".to_string(),
+                cursor: 10,
+                size: 10,
+                truncated: false,
+            },
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    let entry = (0..agent.scrollback.len())
+        .filter_map(|index| agent.scrollback.get(index))
+        .find(|entry| matches!(entry.block, RenderBlock::ToolCall(ToolCallBlock::Execute(_))))
+        .expect("execute block");
+    let RenderBlock::ToolCall(ToolCallBlock::Execute(execute)) = &entry.block else {
+        panic!("expected execute block");
+    };
+    assert_eq!(execute.output.as_deref(), Some("Compiling\n"));
+    assert!(entry.is_running, "progress must not end the tool");
+}
+
+/// A page for a call ACP already settled paints nothing and stops the poll, so
+/// a late page cannot overwrite the terminal output.
+#[test]
+fn tool_progress_output_is_dropped_after_the_call_settles() {
+    let mut app = test_app_with_agent();
+    running_execute(&mut app, "tc-shell");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .tool_progress
+            .note(crate::app::tool_progress::ToolProgressEvent {
+                assistant_message_id: "msg_1".to_string(),
+                tool_call_id: "tc-shell".to_string(),
+                metadata: serde_json::json!({ "shellID": "sh_1" }),
+            });
+        // ACP completes the call with its own output.
+        let meta = crate::acp::meta::NotificationMeta::default();
+        let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new("tc-shell"),
+            acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+        ));
+        let (session, scrollback) = (&mut agent.session, &mut agent.scrollback);
+        session.handle_update(update, &meta, scrollback);
+    }
+    let before = execute_output(app.agents.get(&AgentId(0)).unwrap());
+    dispatch(
+        Action::TaskComplete(TaskResult::ToolProgressOutput {
+            agent_id: AgentId(0),
+            tool_call_id: "tc-shell".to_string(),
+            page: openbuild_backend::http_feed::ShellOutputPage {
+                output: "late\n".to_string(),
+                cursor: 5,
+                size: 5,
+                truncated: false,
+            },
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    assert_eq!(execute_output(agent), before, "terminal output must win");
+    assert!(
+        agent.tool_progress.shell_targets().is_empty(),
+        "a settled call must stop being polled"
+    );
+}
+
+/// A failed fetch stops the poll instead of retrying forever, and never touches
+/// the block.
+#[test]
+fn tool_progress_failure_stops_polling() {
+    let mut app = test_app_with_agent();
+    running_execute(&mut app, "tc-shell");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .tool_progress
+            .note(crate::app::tool_progress::ToolProgressEvent {
+                assistant_message_id: "msg_1".to_string(),
+                tool_call_id: "tc-shell".to_string(),
+                metadata: serde_json::json!({ "shellID": "sh_1" }),
+            });
+    }
+    assert_eq!(
+        test_agent(&app, AgentId(0)).tool_progress.shell_targets().len(),
+        1
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ToolProgressOutputFailed {
+            agent_id: AgentId(0),
+            tool_call_id: "tc-shell".to_string(),
+            error: "404 not found".to_string(),
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    assert!(agent.tool_progress.shell_targets().is_empty());
+    assert!(agent
+        .scrollback
+        .get(0)
+        .is_some_and(|entry| entry.is_running));
+}
+
+/// The output currently painted on the first execute block.
+fn execute_output(agent: &AgentView) -> Option<String> {
+    (0..agent.scrollback.len())
+        .filter_map(|index| agent.scrollback.get(index))
+        .find_map(|entry| match &entry.block {
+            RenderBlock::ToolCall(ToolCallBlock::Execute(execute)) => execute.output.clone(),
+            _ => None,
+        })
+}

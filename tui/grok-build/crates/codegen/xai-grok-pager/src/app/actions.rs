@@ -3009,6 +3009,19 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         error: String,
     },
+    /// One polled `GET /api/shell/:id/output` page for a running shell tool.
+    ToolProgressOutput {
+        agent_id: AgentId,
+        tool_call_id: String,
+        page: openbuild_backend::http_feed::ShellOutputPage,
+    },
+    /// The shell output endpoint refused; the block keeps whatever ACP will
+    /// report, and the poll for this call stops instead of retrying forever.
+    ToolProgressOutputFailed {
+        agent_id: AgentId,
+        tool_call_id: String,
+        error: String,
+    },
     /// Feedback submitted successfully (fire-and-forget).
     /// A modal-origin completion only takes the consent parked for its exact submission; anything else is stale and a no-op.
     FeedbackComplete {

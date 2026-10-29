@@ -779,6 +779,60 @@ pub(super) fn handle_session_diff_failed(
 
 // Action handlers.
 
+/// One polled shell output page landed for a running execute tool.
+///
+/// The accumulated text is painted into that call's block *only* while the block
+/// is still running: once ACP reports the terminal state it owns the output, and
+/// a late page must not overwrite it (or revive a finished row).
+pub(super) fn handle_tool_progress_output(
+    app: &mut AppView,
+    agent_id: AgentId,
+    tool_call_id: &str,
+    page: openbuild_backend::http_feed::ShellOutputPage,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let Some(text) = agent.tool_progress.apply_page(tool_call_id, &page) else {
+        return vec![];
+    };
+    // `tool_title` stays set while ACP still tracks the call. A None there means
+    // it settled, so paging its shell further would only waste requests.
+    if agent.session.tracker.tool_title(tool_call_id).is_none() {
+        agent.tool_progress.forget(tool_call_id);
+        return vec![];
+    }
+    let Some(entry_id) = agent.session.tracker.pending_tool_entry_id(tool_call_id) else {
+        // Tracked but not painted yet (the placeholder lands on the next ACP
+        // update). Keep the accumulated text so it is not lost.
+        return vec![];
+    };
+    let still_running = agent
+        .scrollback
+        .get_by_id(entry_id)
+        .is_some_and(|entry| entry.is_running);
+    if !still_running {
+        return vec![];
+    }
+    agent.scrollback.set_execute_output(entry_id, &text);
+    vec![]
+}
+
+/// The shell output endpoint refused. Stop polling that call; the block keeps
+/// whatever ACP reports and its terminal state is unaffected.
+pub(super) fn handle_tool_progress_output_failed(
+    app: &mut AppView,
+    agent_id: AgentId,
+    tool_call_id: &str,
+    error: &str,
+) -> Vec<Effect> {
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.tool_progress.forget(tool_call_id);
+    }
+    tracing::debug!(tool_call_id, error, "shell output poll stopped");
+    vec![]
+}
+
 pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
     // Try agent modal first, then fall back to app fields (welcome screen).

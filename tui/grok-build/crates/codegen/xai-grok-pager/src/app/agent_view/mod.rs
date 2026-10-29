@@ -890,6 +890,12 @@ pub struct AgentView {
     /// the compaction threshold come from ACP's `session/info`, while these are
     /// the kernel's own accounting. Mixing them would change `/compact`.
     pub kernel_usage: Option<super::kernel_usage::KernelUsage>,
+    /// Live `session.tool.progress` state for this agent's running tools.
+    ///
+    /// Display-only: the feed names which shell is running (`metadata.shellID`)
+    /// and the event loop pulls that shell's bytes; ACP still decides when the
+    /// tool ends and what its final output is.
+    pub tool_progress: super::tool_progress::ToolProgressStore,
     pub status_context: Option<xai_grok_status_line::StatusLineContext>,
     /// Held across a frame that clamps the row away, so a script keeps the size
     /// it last painted at.

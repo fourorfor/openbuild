@@ -23,6 +23,7 @@ pub mod connections;
 pub(crate) mod pane_render;
 pub(crate) mod diff_view;
 pub(crate) mod kernel_usage;
+pub(crate) mod tool_progress;
 pub(crate) mod deferred_subagent_finishes;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;

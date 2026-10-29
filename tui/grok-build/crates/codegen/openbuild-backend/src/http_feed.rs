@@ -242,6 +242,40 @@ impl FeedClient {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// `GET /api/shell/:id/output?cursor=N` on this connection's server.
+    ///
+    /// `session.tool.progress` only names the running shell (`metadata.shellID`);
+    /// the bytes a long command prints live behind this endpoint and are paged by
+    /// absolute byte cursor.
+    pub async fn shell_output(
+        &self,
+        shell_id: &str,
+        cursor: u32,
+    ) -> Result<ShellOutputPage> {
+        let client = client()?;
+        let url = format!(
+            "{}/api/shell/{}/output?cursor={}",
+            self.endpoint.base_url.trim_end_matches('/'),
+            urlencode_path_segment(shell_id),
+            cursor
+        );
+        let response = client
+            .get(url)
+            .header(reqwest::header::AUTHORIZATION, self.endpoint.auth_header())
+            .send()
+            .await
+            .context("request the shell output")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read the shell output response")?;
+        if !status.is_success() {
+            bail!("shell output failed with {status}: {}", body.trim());
+        }
+        parse_shell_output(&body)
+    }
+
     /// `GET /api/session/:sessionID/diff?context=N`.
     pub async fn session_diff(
         &self,
@@ -329,6 +363,54 @@ pub fn parse_session_diff(body: &str) -> Result<Vec<SessionFileDiff>> {
         .iter()
         .filter_map(|item| serde_json::from_value::<SessionFileDiff>(item.clone()).ok())
         .collect())
+}
+
+/// One page of `GET /api/shell/:id/output`.
+///
+/// Mirrors the kernel's `Shell.Output`: `output` is the bytes from the requested
+/// cursor, `cursor` is the absolute position after them, and `size` is everything
+/// captured so far. Paging stops when `cursor >= size`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellOutputPage {
+    pub output: String,
+    pub cursor: u32,
+    pub size: u32,
+    pub truncated: bool,
+}
+
+impl ShellOutputPage {
+    /// Whether the command has printed more than this page returned.
+    pub fn has_more(&self) -> bool {
+        self.cursor < self.size
+    }
+}
+
+/// Decode the `{ data: { output, cursor, size, truncated } }` envelope.
+///
+/// Also accepts the bare object, so a shape change degrades to "no page" instead
+/// of breaking the caller.
+pub fn parse_shell_output(body: &str) -> Result<ShellOutputPage> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("the shell output response was not JSON")?;
+    let data = value.get("data").unwrap_or(&value);
+    let Some(output) = data.get("output").and_then(|v| v.as_str()) else {
+        bail!("the shell output response had no output field");
+    };
+    let number = |key: &str| -> u32 {
+        data.get(key)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    };
+    Ok(ShellOutputPage {
+        output: output.to_string(),
+        cursor: number("cursor"),
+        size: number("size"),
+        truncated: data
+            .get("truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 /// Percent-encode a path segment (session ids are `ses_…`, but never assume it).
@@ -895,6 +977,31 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert!(parse_session_diff("not json").is_err());
         assert!(parse_session_diff(r#"{"error":"boom"}"#).is_err());
+    }
+
+    /// The kernel answers `{ data: { output, cursor, size, truncated } }`; a bare
+    /// object is accepted too, and `cursor < size` is what tells the caller to
+    /// ask for the next page.
+    #[test]
+    fn shell_output_parses_the_data_envelope() {
+        let page = parse_shell_output(
+            r#"{"data":{"output":"build\n","cursor":6,"size":11,"truncated":false}}"#,
+        )
+        .expect("parsed");
+        assert_eq!(page.output, "build\n");
+        assert_eq!((page.cursor, page.size), (6, 11));
+        assert!(page.has_more());
+        assert!(!page.truncated);
+
+        let caught_up = parse_shell_output(r#"{"output":"","cursor":11,"size":11}"#)
+            .expect("bare object");
+        assert!(!caught_up.has_more());
+    }
+
+    #[test]
+    fn shell_output_rejects_a_body_without_output() {
+        assert!(parse_shell_output(r#"{"data":{"cursor":1}}"#).is_err());
+        assert!(parse_shell_output("not json").is_err());
     }
 
     /// Two kernels publish to two slots. A single `Option` used to let the
