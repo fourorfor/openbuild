@@ -880,6 +880,16 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    /// Latest kernel token/cost snapshot from `session.usage.updated`.
+    ///
+    /// Only the HTTP feed carries this event, and it is **ephemeral**: a
+    /// reconnect does not replay it, so the field goes back to `None` (shown as
+    /// "unknown") rather than keeping stale numbers or inventing zeros.
+    ///
+    /// This is deliberately separate from `context_state`: the context bar and
+    /// the compaction threshold come from ACP's `session/info`, while these are
+    /// the kernel's own accounting. Mixing them would change `/compact`.
+    pub kernel_usage: Option<super::kernel_usage::KernelUsage>,
     pub status_context: Option<xai_grok_status_line::StatusLineContext>,
     /// Held across a frame that clamps the row away, so a script keeps the size
     /// it last painted at.

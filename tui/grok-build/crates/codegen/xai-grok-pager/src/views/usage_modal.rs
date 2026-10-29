@@ -86,6 +86,8 @@ pub struct UsageInfoModalState {
     pub scroll: u16,
     pub ctx: UsageInfoContext,
     pub context: Option<ContextInfoBlock>,
+    /// Latest kernel token/cost snapshot (`session.usage.updated`), if any.
+    pub kernel_usage: Option<crate::app::kernel_usage::KernelUsage>,
     pub context_error: Option<String>,
     /// Structured `/session-info` rows, built upstream from typed session data (never by re-parsing a formatted string).
     pub session_fields: Option<Vec<SessionInfoField>>,
@@ -143,6 +145,7 @@ impl UsageInfoModalState {
             scroll: 0,
             ctx,
             context: None,
+            kernel_usage: None,
             context_error: None,
             session_error: None,
             session_usage_text: None,
@@ -735,6 +738,7 @@ fn muted_line(theme: &Theme, s: impl Into<String>) -> Line<'static> {
 }
 
 fn context_tab_lines(state: &UsageInfoModalState, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     if let Some(error) = &state.context_error {
         return vec![muted_line(
             theme,
@@ -742,12 +746,26 @@ fn context_tab_lines(state: &UsageInfoModalState, theme: &Theme, width: u16) -> 
         )];
     }
     if let Some(block) = &state.context {
-        return block.lines_for_width(theme, width);
+        lines.extend(block.lines_for_width(theme, width));
+    } else if state.ctx.session_id.is_none() {
+        lines.push(muted_line(theme, "No active session."));
+        return lines;
+    } else {
+        lines.push(muted_line(theme, "Loading context usage\u{2026}"));
     }
-    if state.ctx.session_id.is_none() {
-        return vec![muted_line(theme, "No active session.")];
-    }
-    vec![muted_line(theme, "Loading context usage\u{2026}")]
+    // The kernel's own token/cost accounting, read-only and clearly separate
+    // from the context window above: it is not the compaction input, so it
+    // never changes the percentage or the threshold.
+    lines.push(Line::default());
+    lines.push(Line::styled("Kernel", header_style(theme)));
+    lines.push(muted_line(
+        theme,
+        match &state.kernel_usage {
+            Some(usage) => format!("Kernel token usage: {}", usage.summary()),
+            None => crate::app::kernel_usage::KernelUsage::unknown_line(),
+        },
+    ));
+    lines
 }
 
 /// Account allowance followed by this session's token/cost totals.

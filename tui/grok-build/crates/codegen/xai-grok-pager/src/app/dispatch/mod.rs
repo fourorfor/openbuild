@@ -37,6 +37,17 @@ mod turn;
 mod voice;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
+
+/// The usage modal state of one agent, for callers outside `dispatch`.
+///
+/// The feed handler lives in the event loop and refreshes an open `/context`
+/// modal from `session.usage.updated`; `status::usage_modal_state_mut` is
+/// `pub(super)`, so this keeps the module boundary instead of widening it.
+pub(crate) fn usage_modal_state_for_feed(
+    agent: &mut crate::app::agent_view::AgentView,
+) -> Option<&mut crate::views::usage_modal::UsageInfoModalState> {
+    status::usage_modal_state_mut(agent)
+}
 pub(crate) use billing::{
     CREDIT_LIMIT_RETRY_OPTION_ID, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error,
 };

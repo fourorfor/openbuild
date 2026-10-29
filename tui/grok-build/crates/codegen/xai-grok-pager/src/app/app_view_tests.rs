@@ -93,6 +93,7 @@ pub(crate) fn test_app() -> AppView {
         pane_layout: crate::app::connections::PaneLayout::default(),
         agent_connections: std::collections::HashMap::new(),
         pane_open_request: None,
+        diff_request: None,
         pane_close_request: None,
         last_pane_area: None,
         pane_notice: None,

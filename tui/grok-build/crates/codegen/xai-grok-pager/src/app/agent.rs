@@ -769,6 +769,11 @@ pub struct AgentSession {
     /// Checked in the `SessionCreated` handler to decide whether to show the `/dashboard` discoverability tip.
     /// `false` for sessions created by `/resume`, welcome-screen picker, `/fork`, or worktree flows.
     pub created_via_new: bool,
+    /// `(session, file, patch)` keys already rendered by `/diff`.
+    ///
+    /// Duplicate suppression lives on the session, not on the view: two panes are
+    /// two sessions, so one pane's diff can never hide another pane's.
+    pub displayed_diffs: std::collections::HashSet<String>,
     /// Human-readable session mode the backend reported through ACP `configOptions`
     /// (`build`, `plan`, …). `None` on backends that do not advertise a mode option,
     /// and on grok-shell, where the permission label already carries this.

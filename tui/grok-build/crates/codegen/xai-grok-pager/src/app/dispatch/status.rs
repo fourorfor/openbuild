@@ -80,6 +80,9 @@ pub(super) fn open_usage_info_modal(
         },
     );
     state.fetch_nonce = nonce;
+    // Snapshot the kernel's own accounting at open time. It is refreshed by the
+    // feed into the agent mirror, and the tab re-reads the agent on every frame.
+    state.kernel_usage = agent.kernel_usage.clone();
 
     let mut effects = Vec::new();
     if let Some(session_id) = session_id {
@@ -673,6 +676,15 @@ pub(super) fn handle_context_info_complete(
             push_and_page_flip(
                 &mut agent.scrollback,
                 crate::scrollback::block::RenderBlock::context_info(snapshot, model),
+            );
+            // Read-only kernel accounting, appended as its own block so it can
+            // never alter the context window rendering above.
+            push_and_page_flip(
+                &mut agent.scrollback,
+                crate::scrollback::block::RenderBlock::system(match &agent.kernel_usage {
+                    Some(usage) => format!("Kernel token usage: {}", usage.summary()),
+                    None => crate::app::kernel_usage::KernelUsage::unknown_line(),
+                }),
             );
         }
         // Full mode with the modal closed: the result arrived after dismissal, so drop it

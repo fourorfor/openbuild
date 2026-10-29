@@ -1482,8 +1482,50 @@ async fn next_http_feed_event(mux: &mut FeedMux) -> Option<FeedEvent> {
 /// The feed is an enhancement, never the authority: anything it carries here is
 /// a snapshot for display. Session state, tool terminal states and diff
 /// correctness all still come from ACP.
-fn handle_feed_event(app: &mut AppView, slot: usize, kind: &str, value: &serde_json::Value) {
-    let _ = (app, slot, kind, value);
+pub(crate) fn handle_feed_event(
+    app: &mut AppView,
+    slot: usize,
+    kind: &str,
+    value: &serde_json::Value,
+) {
+    match kind {
+        // Real-time token/cost accounting. Ephemeral: never replayed, so the
+        // field is not carried across a reconnect.
+        "session.usage.updated" => {
+            let data = value.get("data").unwrap_or(value);
+            let Some(session_id) = data.get("sessionID").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let Some(usage) = crate::app::kernel_usage::KernelUsage::from_event(data) else {
+                return;
+            };
+            // Route by session id, not by slot: a pane may hold several agents.
+            if let Some(agent) = app
+                .agents
+                .values_mut()
+                .find(|agent| {
+                    agent
+                        .session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|id| id.0.as_ref() == session_id)
+                })
+            {
+                agent.kernel_usage = Some(usage.clone());
+                // Keep an open `/context` modal current without re-fetching.
+                if let Some(state) = crate::app::dispatch::usage_modal_state_for_feed(agent) {
+                    state.kernel_usage = Some(usage);
+                }
+            } else {
+                tracing::trace!(
+                    slot,
+                    session = session_id,
+                    "usage event for an unknown session"
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Pop one merged ACP message without losing a close notice.
@@ -3208,6 +3250,11 @@ pub(crate) async fn run(
                         .unwrap_or("event");
                     tracing::trace!(slot, kind, "http feed event");
                     handle_feed_event(&mut app, slot, kind, &value);
+                    // A usage snapshot changes what /context shows, so the
+                    // frame is repainted (throttled, like every other change).
+                    if kind == "session.usage.updated" {
+                        presenter.request(false);
+                    }
                 } else {
                     // Shutdown or a fatal stream error. The TUI keeps running;
                     // `/backend` reports the stopped feed for that slot.
@@ -5320,6 +5367,76 @@ fn process_effects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// session.usage.updated is routed by session id into the owning agent,
+    /// and an unknown session is ignored instead of writing elsewhere.
+    #[test]
+    fn usage_events_land_on_the_owning_agent() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let event = serde_json::json!({
+            "type": "session.usage.updated",
+            "data": {
+                "sessionID": "test-session",
+                "cost": 0.25,
+                "input": 11,
+                "output": 22,
+                "reasoning": 3,
+                "cache_read": 4,
+                "cache_write": 5,
+            }
+        });
+        handle_feed_event(&mut app, 0, "session.usage.updated", &event);
+        let usage = app
+            .agents
+            .values()
+            .find_map(|agent| agent.kernel_usage.clone())
+            .expect("usage snapshot");
+        assert_eq!((usage.input, usage.output), (11, 22));
+        assert_eq!((usage.cache_read, usage.cache_write), (4, 5));
+        assert!((usage.cost - 0.25).abs() < 1e-9);
+
+        // Another session id must not overwrite the first agent's snapshot.
+        let other = serde_json::json!({
+            "type": "session.usage.updated",
+            "data": { "sessionID": "someone-else", "input": 999 }
+        });
+        handle_feed_event(&mut app, 0, "session.usage.updated", &other);
+        let usage = app
+            .agents
+            .values()
+            .find_map(|agent| agent.kernel_usage.clone())
+            .expect("usage snapshot");
+        assert_eq!(usage.input, 11);
+    }
+
+    /// A payload without a session id or without any counters is ignored, so a
+    /// malformed event cannot blank an existing snapshot.
+    #[test]
+    fn malformed_usage_events_are_ignored() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let good = serde_json::json!({
+            "type": "session.usage.updated",
+            "data": { "sessionID": "test-session", "input": 7 }
+        });
+        handle_feed_event(&mut app, 0, "session.usage.updated", &good);
+        let missing_id = serde_json::json!({
+            "type": "session.usage.updated",
+            "data": { "input": 1 }
+        });
+        handle_feed_event(&mut app, 0, "session.usage.updated", &missing_id);
+        let not_an_object = serde_json::json!({
+            "type": "session.usage.updated",
+            "data": "nope"
+        });
+        handle_feed_event(&mut app, 0, "session.usage.updated", &not_an_object);
+        let usage = app
+            .agents
+            .values()
+            .find_map(|agent| agent.kernel_usage.clone())
+            .expect("usage snapshot");
+        assert_eq!(usage.input, 7);
+    }
+
     fn nth<T>(xs: &[T], i: usize) -> &T {
         let Some(x) = xs.get(i) else {
             panic!("expected index {i}, len {}", xs.len());
