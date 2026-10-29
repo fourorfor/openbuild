@@ -815,6 +815,17 @@ pub(super) fn handle_tool_progress_output(
         return vec![];
     }
     agent.scrollback.set_execute_output(entry_id, &text);
+    // Mid-run output is only visible if the row is not collapsed: agent execute
+    // tools default to Collapsed (title only). Switch to Truncated (first/last
+    // lines) on the first page, which is what `bash_mode` shows, and never
+    // override a fold the user made by hand.
+    if let Some(entry) = agent.scrollback.get_by_id_mut(entry_id)
+        && entry.display_mode == crate::scrollback::types::DisplayMode::Collapsed
+        && !entry.display_mode_pinned
+    {
+        entry.set_display_mode(crate::scrollback::types::DisplayMode::Truncated);
+        agent.scrollback.mark_height_dirty(entry_id);
+    }
     vec![]
 }
 

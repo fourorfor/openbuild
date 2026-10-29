@@ -206,6 +206,15 @@ impl ToolProgressStore {
             .retain(|tracked| tracked.event.tool_call_id != tool_call_id);
     }
 
+    /// Drop entries whose call ACP no longer tracks.
+    ///
+    /// A settled call is the normal end of the poll: without this, a shell whose
+    /// last page arrived before the terminal update would keep one request in
+    /// flight per tick forever.
+    pub fn retain_live(&mut self, is_live: impl Fn(&str) -> bool) {
+        self.entries.retain(|tracked| is_live(&tracked.event.tool_call_id));
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }

@@ -3526,25 +3526,43 @@ pub(crate) async fn run(
                 // `select!`. ACP still owns the tool's terminal state.
                 progress_poll_at = None;
                 let mut pending = 0usize;
-                for (agent_id, agent) in app.agents.iter() {
+                // Snapshot each agent's feed handle first: pruning needs `&mut`
+                // while `connection_of` needs the whole app.
+                let pollable: Vec<(crate::app::agent::AgentId, Option<openbuild_backend::http_feed::FeedClient>)> =
+                    app.agents
+                        .keys()
+                        .map(|agent_id| {
+                            let client = app
+                                .connections
+                                .get(&app.connection_of(*agent_id))
+                                .and_then(|handle| handle.http_feed.as_ref())
+                                .map(|feed| feed.client_handle());
+                            (*agent_id, client)
+                        })
+                        .collect();
+                for (agent_id, client) in pollable {
+                    let Some(agent) = app.agents.get_mut(&agent_id) else {
+                        continue;
+                    };
+                    // ACP is the authority on "still running": prune before
+                    // polling so a settled call never keeps a request in flight.
+                    agent
+                        .tool_progress
+                        .retain_live(|tool_call_id| {
+                            agent.session.tracker.tool_title(tool_call_id).is_some()
+                        });
                     let targets = agent.tool_progress.shell_targets();
                     if targets.is_empty() {
                         continue;
                     }
-                    let Some(client) = app
-                        .connections
-                        .get(&app.connection_of(*agent_id))
-                        .and_then(|handle| handle.http_feed.as_ref())
-                        .map(|feed| feed.client_handle())
-                    else {
+                    let Some(client) = client else {
                         continue;
                     };
                     pending += targets.len();
                     for target in targets {
-                        if !progress_in_flight.insert((*agent_id, target.tool_call_id.clone())) {
+                        if !progress_in_flight.insert((agent_id, target.tool_call_id.clone())) {
                             continue;
                         }
-                        let agent_id = *agent_id;
                         let client = client.clone();
                         tasks.spawn(async move {
                             let outcome = client

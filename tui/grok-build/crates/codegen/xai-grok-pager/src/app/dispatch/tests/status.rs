@@ -2317,6 +2317,67 @@ fn tool_progress_output_lands_in_the_running_execute_block() {
     };
     assert_eq!(execute.output.as_deref(), Some("Compiling\n"));
     assert!(entry.is_running, "progress must not end the tool");
+    // Mid-run output has to be visible: a Collapsed row shows the title only.
+    assert_eq!(
+        entry.display_mode,
+        crate::scrollback::types::DisplayMode::Truncated,
+        "the first page must reveal the streaming preview"
+    );
+}
+
+/// A hand-folded running block keeps the user's mode: progress must not pop it
+/// back open.
+#[test]
+fn tool_progress_respects_a_manual_collapse() {
+    let mut app = test_app_with_agent();
+    running_execute(&mut app, "tc-shell");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .tool_progress
+            .note(crate::app::tool_progress::ToolProgressEvent {
+                assistant_message_id: "msg_1".to_string(),
+                tool_call_id: "tc-shell".to_string(),
+                metadata: serde_json::json!({ "shellID": "sh_1" }),
+            });
+        let index = (0..agent.scrollback.len())
+            .find(|index| {
+                agent
+                    .scrollback
+                    .get(*index)
+                    .is_some_and(|entry| {
+                        matches!(entry.block, RenderBlock::ToolCall(ToolCallBlock::Execute(_)))
+                    })
+            })
+            .expect("execute block");
+        let entry = agent.scrollback.get_mut(index).expect("execute block");
+        entry.set_display_mode(crate::scrollback::types::DisplayMode::Collapsed);
+        entry.display_mode_pinned = true;
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::ToolProgressOutput {
+            agent_id: AgentId(0),
+            tool_call_id: "tc-shell".to_string(),
+            page: openbuild_backend::http_feed::ShellOutputPage {
+                output: "hidden\n".to_string(),
+                cursor: 7,
+                size: 7,
+                truncated: false,
+            },
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    let entry = (0..agent.scrollback.len())
+        .filter_map(|index| agent.scrollback.get(index))
+        .find(|entry| matches!(entry.block, RenderBlock::ToolCall(ToolCallBlock::Execute(_))))
+        .expect("execute block");
+    assert_eq!(
+        entry.display_mode,
+        crate::scrollback::types::DisplayMode::Collapsed,
+        "a pinned fold must survive progress"
+    );
+    assert_eq!(execute_output(agent).as_deref(), Some("hidden\n"));
 }
 
 /// A page for a call ACP already settled paints nothing and stops the poll, so
