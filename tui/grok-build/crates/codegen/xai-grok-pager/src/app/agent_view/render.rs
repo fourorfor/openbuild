@@ -456,6 +456,9 @@ impl AgentView {
             fold_label,
             if self.active_pane == ActivePane::Dock {
                 self.dock_enter_label()
+            } else if self.single_openable_child_in_selected_group().is_some() {
+                // The header's double-click opens the folded child, so advertise that instead of a plain expand.
+                Some("open subagent")
             } else {
                 self.scrollback.selected_group_header_fold_label()
             },

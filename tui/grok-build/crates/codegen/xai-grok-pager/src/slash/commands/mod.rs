@@ -62,6 +62,7 @@ pub mod screen_mode_switch;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod subagent;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -130,6 +131,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(find::FindCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(subagent::SubagentCommand),
         // Extending the agent.
         Arc::new(plugin::SkillsCommand),
         Arc::new(mcps::McpsCommand),

@@ -4131,10 +4131,27 @@
         assert_eq!(at(&flags, 0).color, Some(theme.accent_success));
         assert_ne!(at(&flags, 0).color, Some(theme.accent_plan));
 
-        // The uncensored badge is a third axis: it must not borrow the plan accent.
+        // The uncensored badge is a third axis: it must not borrow the plan
+        // accent, and it must be colorless so it matches the permission flag.
         let flags = mode_flags(Some(UNCENSORED_BADGE), PermissionLabel::Ask, &theme);
         assert_eq!(at(&flags, 0).text, UNCENSORED_BADGE);
-        assert_eq!(at(&flags, 0).color, Some(theme.accent_system));
+        assert_eq!(at(&flags, 0).color, None);
+
+        // Same-color guarantee: the content-policy badge and `always-approve`
+        // both render through the `color: None` muted branch.
+        let flags = mode_flags(Some(UNCENSORED_BADGE), PermissionLabel::AlwaysApprove, &theme);
+        assert_eq!(at(&flags, 0).color, at(&flags, 1).color);
+        assert_eq!(at(&flags, 1).color, None);
+    }
+
+    /// The info line reads `model · badge · permission`. Both of its neighbours
+    /// (`done/...` and `always-approve`) are ASCII, so a CJK badge would look
+    /// like a different kind of field. Keep the literal English.
+    #[test]
+    fn uncensored_badge_label_stays_ascii_and_lowercase() {
+        assert_eq!(UNCENSORED_BADGE, "uncensored");
+        assert!(UNCENSORED_BADGE.is_ascii(), "{UNCENSORED_BADGE:?}");
+        assert_eq!(UNCENSORED_BADGE, UNCENSORED_BADGE.to_lowercase());
     }
 
     /// The "plan" mode flag on the bottom divider keeps its accent color on the terminal theme: the

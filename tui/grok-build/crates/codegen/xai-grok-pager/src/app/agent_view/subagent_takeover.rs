@@ -31,12 +31,19 @@ pub(super) struct InheritedOverlay<'a> {
 }
 impl AgentView {
     /// Open the fullscreen subagent view for `child_sid`, replaying child `updates.jsonl` when the child scrollback is still empty (or the child finished).
+    ///
+    /// A child whose view is gone (evicted, pruned, or from a transcript replayed inside another child) cannot be opened,
+    /// so this reports why instead of returning silently: a double-click that does nothing reads as a broken UI.
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
-        let Some(child) = self.subagent_views.get(&child_sid) else {
+        if !self.subagent_views.contains_key(&child_sid) {
+            tracing::debug!(child_sid = %child_sid, "subagent view missing; refusing to open");
+            self.show_toast("That subagent's view was released; its transcript is unavailable");
             return;
-        };
-        let parent_session_id = child
-            .child_link()
+        }
+        let parent_session_id = self
+            .subagent_views
+            .get(&child_sid)
+            .and_then(|child| child.child_link())
             .map(|link| link.parent_session_id().clone());
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
@@ -48,8 +55,37 @@ impl AgentView {
             ?replay_outcome,
             "opened subagent fullscreen"
         );
-        self.active_subagent = Some(child_sid);
+        self.active_subagent = Some(child_sid.clone());
+        // The point of opening a child is seeing what it is thinking: lift collapsed thoughts to
+        // `Truncated` so the reasoning is visible without another `ctrl+e`. A pinned fold stays put.
+        if let Some(child) = self.subagent_views.get_mut(&child_sid)
+            && child.scrollback.reveal_collapsed_thinking()
+        {
+            tracing::debug!(child_sid = %child_sid, "revealed collapsed thinking in the opened subagent view");
+        }
     }
+    /// Double-click on a group header: open the one subagent the group folds away.
+    ///
+    /// A folded verb run hides its member rows at height 0, so the header is the only clickable row while a child
+    /// sits inside it. With exactly one linked child the intent is unambiguous, so the header opens it; with several
+    /// the code must not guess and returns `false`, letting the caller expand the group instead.
+    pub(crate) fn open_only_child_in_selected_group(&mut self) -> bool {
+        let Some(child_sid) = self.single_openable_child_in_selected_group() else {
+            return false;
+        };
+        self.open_subagent_fullscreen(child_sid);
+        true
+    }
+    /// The one child this view can take over from the selected group, or `None` when the group holds zero or several.
+    pub(crate) fn single_openable_child_in_selected_group(&self) -> Option<String> {
+        let ids = self.scrollback.selected_group_child_session_ids();
+        if ids.len() != 1 {
+            return None;
+        }
+        ids.into_iter()
+            .find(|child_sid| self.subagent_views.contains_key(child_sid))
+    }
+
     /// Open the takeover for the child the selected row links to (`RenderBlock::child_session_id`). `false`, so the
     /// caller keeps its routing, on a group header, an unlinked row, or a child this view does not own (a row
     /// replayed inside a child transcript).

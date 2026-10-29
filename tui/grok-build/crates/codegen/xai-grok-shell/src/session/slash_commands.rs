@@ -529,6 +529,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "share",
     "show-plan",
     "skills",
+    "subagent",
     "summarize",
     "tasks",
     "terminal-check",

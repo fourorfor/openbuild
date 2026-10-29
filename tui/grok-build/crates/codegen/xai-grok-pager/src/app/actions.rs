@@ -711,6 +711,13 @@ pub enum Action {
     /// Commit a read-only list of background tasks, subagents, and scheduled tasks as a system block (`/tasks`).
     /// This is what minimal mode uses in place of the `TasksPane`.
     ShowTasks,
+    /// `/subagent`: list this session's subagents, or open one by index / child session id.
+    ///
+    /// Opening does not depend on a scrollback row being visible, so a child folded into a group header (or one
+    /// whose rows scrolled away) stays reachable.
+    SubagentCommand {
+        target: Option<String>,
+    },
     /// Show the current plan: preview popover if exists, toast if not.
     ShowPlan,
     /// Enter plan mode. If a description is provided, also start a turn with that text as the prompt.

@@ -418,3 +418,111 @@ fn child_ctrl_r_keeps_scrollback_precedence() {
     assert!(child.active_modal.is_none());
     assert!(child.is_bare_scrollback());
 }
+
+/// A parent holding a verb-group run that folds a tool row and one subagent into a single header.
+fn parent_with_folded_child(child_sid: &str) -> AgentView {
+    let mut parent = parent_with_child(child_sid);
+    parent
+        .scrollback
+        .push_block(RenderBlock::read("a.rs", None));
+    parent.scrollback.push_block(RenderBlock::Subagent(
+        SubagentBlock::started("task", child_sid, "explore", None, None, None, false),
+    ));
+    parent.scrollback.prepare_layout(80, 40);
+    parent.scrollback.set_selected(Some(0));
+    parent
+}
+
+#[test]
+fn double_click_on_a_group_header_opens_its_only_child() {
+    let now = Instant::now();
+    let again = now + Duration::from_millis(10);
+    let mut parent = parent_with_folded_child(CHILD_SID);
+    assert!(
+        parent
+            .scrollback
+            .get_cached_entry_layouts()
+            .is_some_and(|layouts| layouts.first().is_some_and(|info| info.verb_group_header)),
+        "precondition: the run folds into a header"
+    );
+
+    (parent.last_click, _) = parent.handle_scrollback_click(now, 0, false);
+    let _ = parent.handle_scrollback_click(again, 0, false);
+
+    assert_eq!(
+        parent.active_subagent.as_deref(),
+        Some(CHILD_SID),
+        "a folded single child opens instead of only expanding the group"
+    );
+}
+
+#[test]
+fn double_click_on_a_group_header_with_two_children_expands_instead() {
+    let now = Instant::now();
+    let again = now + Duration::from_millis(10);
+    let mut parent = parent_with_child(CHILD_SID);
+    parent
+        .scrollback
+        .push_block(RenderBlock::Subagent(SubagentBlock::started(
+            "task", CHILD_SID, "explore", None, None, None, false,
+        )));
+    parent
+        .scrollback
+        .push_block(RenderBlock::Subagent(SubagentBlock::started(
+            "task", "child-two", "explore", None, None, None, false,
+        )));
+    parent.scrollback.prepare_layout(80, 40);
+    parent.scrollback.set_selected(Some(0));
+
+    (parent.last_click, _) = parent.handle_scrollback_click(now, 0, false);
+    let _ = parent.handle_scrollback_click(again, 0, false);
+
+    assert_eq!(
+        parent.active_subagent, None,
+        "with several children the gesture must not pick one"
+    );
+    assert!(
+        parent
+            .scrollback
+            .get_cached_entry_layouts()
+            .is_some_and(|layouts| layouts.first().is_some_and(|info| info.group_collapse_header)),
+        "the group expands so the user can choose"
+    );
+}
+
+#[test]
+fn opening_a_child_reveals_its_collapsed_thinking() {
+    let mut parent = parent_with_child(CHILD_SID);
+    let child = parent
+        .subagent_view_mut(CHILD_SID)
+        .unwrap_or_else(|| panic!("missing child view"));
+    let thought = child.scrollback.push_block(RenderBlock::thinking("planning"));
+    child
+        .scrollback
+        .get_by_id_mut(thought)
+        .unwrap_or_else(|| panic!("missing thought"))
+        .set_display_mode(DisplayMode::Collapsed);
+
+    parent.open_subagent_fullscreen(CHILD_SID.to_owned());
+
+    assert_eq!(
+        parent
+            .subagent_view(CHILD_SID)
+            .and_then(|view| view.scrollback.get_by_id(thought))
+            .map(|entry| entry.display_mode()),
+        Some(DisplayMode::Truncated),
+        "the takeover opens on the child's reasoning, not a collapsed header"
+    );
+}
+
+#[test]
+fn opening_a_missing_child_reports_instead_of_failing_silently() {
+    let mut parent = make_agent();
+    parent.open_subagent_fullscreen("never-seen".to_owned());
+    assert_eq!(parent.active_subagent, None);
+    let toast = parent.toast.as_ref().map(|(text, _)| text.as_str());
+    assert!(
+        toast.is_some_and(|text| text.contains("released")),
+        "a missing child must explain itself, got {toast:?}"
+    );
+}

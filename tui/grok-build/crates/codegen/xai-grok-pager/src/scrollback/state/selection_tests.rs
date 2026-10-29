@@ -2195,3 +2195,83 @@ fn reapply_thinking_fold_policy_preserves_expanded_tool_groups() {
         "expanded tool-call members must stay visible after thinking refold, visible_tools={visible_tools}"
     );
 }
+
+#[test]
+fn selected_group_reports_the_single_folded_child() {
+    let mut state = verb_state();
+    push_reads(&mut state, 2);
+    push_subagent(&mut state, "child-A");
+    state.prepare_layout(80, 40);
+    state.set_selected(Some(0));
+
+    assert_eq!(
+        state.selected_group_child_session_ids(),
+        vec!["child-A".to_string()],
+        "the folded member row still answers for the header"
+    );
+}
+
+#[test]
+fn selected_group_reports_every_distinct_child() {
+    let mut state = verb_state();
+    push_subagent(&mut state, "child-A");
+    push_subagent(&mut state, "child-B");
+    push_subagent(&mut state, "child-A");
+    state.prepare_layout(80, 40);
+    state.set_selected(Some(0));
+
+    assert_eq!(
+        state.selected_group_child_session_ids(),
+        vec!["child-A".to_string(), "child-B".to_string()],
+        "ids are deduplicated in group order"
+    );
+}
+
+#[test]
+fn selected_group_without_children_reports_nothing() {
+    let mut state = verb_state();
+    push_reads(&mut state, 3);
+    state.prepare_layout(80, 40);
+    state.set_selected(Some(0));
+
+    assert!(state.selected_group_child_session_ids().is_empty());
+}
+
+#[test]
+fn reveal_collapsed_thinking_lifts_only_unpinned_collapsed_thoughts() {
+    let mut state = verb_state();
+    let collapsed = push_thought(&mut state, "collapsed reasoning");
+    let pinned = push_thought(&mut state, "user folded reasoning");
+    let expanded = push_thought(&mut state, "already open");
+    state
+        .get_by_id_mut(expanded)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    state.prepare_layout(80, 40);
+    {
+        let entry = state.get_by_id_mut(pinned).unwrap();
+        entry.display_mode_pinned = true;
+    }
+
+    assert!(state.reveal_collapsed_thinking(), "one thought changes");
+
+    assert_eq!(
+        state.get_by_id(collapsed).unwrap().display_mode(),
+        DisplayMode::Truncated,
+        "a plain collapsed thought opens to its truncated body"
+    );
+    assert_eq!(
+        state.get_by_id(pinned).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "a user-pinned fold is never overridden"
+    );
+    assert_eq!(
+        state.get_by_id(expanded).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "an already-open thought keeps its mode"
+    );
+    assert!(
+        !state.reveal_collapsed_thinking(),
+        "a second call finds nothing left to lift"
+    );
+}

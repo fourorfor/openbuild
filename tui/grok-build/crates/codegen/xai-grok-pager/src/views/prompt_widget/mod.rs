@@ -301,7 +301,10 @@ pub struct PromptFlag<'a> {
 
 /// Badge for the optional direct content policy (`/uncensored`).
 /// Kept here so the agent view and the prompt flags use one literal.
-pub const UNCENSORED_BADGE: &str = "无审查";
+///
+/// English on purpose: it sits between the model id and `always-approve`, both
+/// of which are English, so a CJK label reads as a different kind of metric.
+pub const UNCENSORED_BADGE: &str = "uncensored";
 
 /// Info-line mode flags shared by the chat prompt and the dashboard peek badge: mode label, then permission.
 /// Mode and permission are independent axes, so neither hides the other.
@@ -312,19 +315,20 @@ pub fn mode_flags<'a>(
 ) -> Vec<PromptFlag<'a>> {
     let mut flags = Vec::new();
     if let Some(text) = mode_label {
-        // Ask must stay distinct from the plan-family accent; the content-policy
-        // badge is a third axis and gets the system accent.
-        let color = if text == SessionMode::Ask.as_id() {
-            theme.accent_success
+        // Ask must stay distinct from the plan-family accent. The content-policy
+        // badge is deliberately colorless so it renders exactly like the
+        // permission flag beside it (`always-approve` also passes `None`).
+        let color: Option<ratatui::style::Color> = if text == SessionMode::Ask.as_id() {
+            Some(theme.accent_success)
         } else if text == UNCENSORED_BADGE {
-            theme.accent_system
+            None
         } else {
-            theme.accent_plan
+            Some(theme.accent_plan)
         };
 
         flags.push(PromptFlag {
             text,
-            color: Some(color),
+            color,
             bold: false,
         });
     }

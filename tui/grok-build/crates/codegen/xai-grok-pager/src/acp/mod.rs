@@ -286,6 +286,34 @@ pub async fn connect_opencode_slot(
     // directory from the start, so the migration and the shared plugin install
     // stay with the primary connection.
     if slot == 0 {
+        // Copy the kernel's old data/state/cache/tmp directories before the kernel
+        // starts: once it runs it creates the new ones, and a non-empty
+        // destination is (correctly) treated as authoritative. The old
+        // directories stay untouched, and a second launch sees the marker.
+        let data_reports = openbuild_backend::data_migration::migrate_global_directories();
+        for report in &data_reports {
+            match &report.outcome {
+                openbuild_backend::data_migration::DirectoryOutcome::Migrated { files, renamed } => {
+                    tracing::info!(
+                        legacy = %report.legacy.display(),
+                        target = %report.target.display(),
+                        files,
+                        renamed,
+                        "copied the kernel data directory out of the upstream opencode path"
+                    );
+                }
+                openbuild_backend::data_migration::DirectoryOutcome::Failed(error) => {
+                    tracing::warn!(
+                        legacy = %report.legacy.display(),
+                        target = %report.target.display(),
+                        %error,
+                        "kernel data migration failed; the next launch retries"
+                    );
+                }
+                _ => {}
+            }
+        }
+
         let migration = openbuild_backend::plugin::migrate_legacy_config_dir();
         if !migration.is_noop() {
             tracing::info!(

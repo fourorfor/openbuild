@@ -1994,7 +1994,9 @@ mod link_click_tests {
                 e.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
             }
         }
-        agent.insert_test_child("child-sid".into(), Box::new(make_agent()));
+        // Deliberately no child view: this group's only subagent cannot be taken over, so Enter has to fall
+        // through to the group toggle. The openable case is covered by
+        // `enter_on_a_foldable_subagent_group_header_opens_that_child`.
         agent.scrollback.prepare_layout(80, 40);
         agent.scrollback.set_selected(Some(0));
         assert!(agent.scrollback.is_selected_group_header());
@@ -2003,11 +2005,65 @@ mod link_click_tests {
         let outcome = agent.handle_scrollback_key(&enter, &registry);
         assert!(
             agent.active_subagent.is_none(),
-            "Enter on a group header must not open the hidden entry's subagent fullscreen"
+            "Enter must not open a subagent this view does not own"
         );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::OpenBlockViewer)),
             "Enter must fall through to OpenBlockViewer (group toggle), got {outcome:?}"
+        );
+    }
+    /// The keyboard half of the double-click gesture: a folded group hiding exactly one openable child opens it,
+    /// because its member row is at height 0 and never reachable by selection.
+    #[test]
+    fn enter_on_a_foldable_subagent_group_header_opens_that_child() {
+        let mut agent = make_agent();
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.scrollback.display.group_max_visible = 3;
+        agent.scrollback.set_appearance(appearance);
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::Subagent(
+                crate::scrollback::blocks::SubagentBlock::started(
+                    "child task",
+                    "child-sid",
+                    "general-purpose",
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+            ));
+        for i in 0..5 {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::tool_call(
+                    format!("Tool{i}"),
+                    "info",
+                    true,
+                ));
+        }
+        for i in 0..6 {
+            if let Some(e) = agent.scrollback.entry_mut(i) {
+                e.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
+            }
+        }
+        agent.insert_test_child("child-sid".into(), Box::new(make_agent()));
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+        assert!(agent.scrollback.is_selected_group_header());
+
+        let registry = ActionRegistry::defaults();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_scrollback_key(&enter, &registry);
+
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some("child-sid"),
+            "the group header opens its only child"
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "opening counts as a handled change, got {outcome:?}"
         );
     }
     #[test]

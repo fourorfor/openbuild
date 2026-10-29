@@ -659,6 +659,63 @@ impl ScrollbackState {
         }
     }
 
+    /// Distinct child-session ids linked by the rows of the group under the selection.
+    ///
+    /// A folded group header hides its member rows (height 0) but they stay in `entries`, so a header can still answer
+    /// "which subagents does double-clicking me reach". Rows without a child link are skipped; the order follows the
+    /// group's own row order so index-based reporting stays stable.
+    pub fn selected_group_child_session_ids(&self) -> Vec<String> {
+        let Some(sel) = self.selected else {
+            return Vec::new();
+        };
+        let range = self.group_range_of(sel, /*collapsed_only=*/ true);
+        let mut ids: Vec<String> = Vec::new();
+        for idx in range {
+            let Some((_, entry)) = self.entries.get_index(idx) else {
+                continue;
+            };
+            let Some(child_sid) = entry.block.child_session_id() else {
+                continue;
+            };
+            if !ids.iter().any(|existing| existing == child_sid) {
+                ids.push(child_sid.to_owned());
+            }
+        }
+        ids
+    }
+
+    /// Lift every collapsed thinking block to `Truncated` so an opened child shows what it was thinking without a
+    /// second keypress. A fold the user pinned is left alone: the pin only exists when a manual fold happened, so
+    /// checking it directly keeps the promise even when `respect_manual_folds` is off. Returns whether anything
+    /// changed.
+    pub fn reveal_collapsed_thinking(&mut self) -> bool {
+        let mut changed = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if !matches!(entry.block, RenderBlock::Thinking(_)) {
+                continue;
+            }
+            if entry.display_mode != DisplayMode::Collapsed {
+                continue;
+            }
+            if entry.display_mode_pinned {
+                continue;
+            }
+            entry.display_mode = DisplayMode::Truncated;
+            entry.invalidate_cache();
+            changed.push(*id);
+        }
+        if changed.is_empty() {
+            return false;
+        }
+        for id in changed {
+            self.dirty_heights.insert(id);
+        }
+        self.gaps_may_be_dirty = true;
+        self.rebuild_layout();
+        self.bump_generation();
+        true
+    }
+
     /// Toggle expansion of the group whose header is the currently selected entry. If the selected entry is a group
     /// header (`is_group_header`), toggles its EntryId in `expanded_groups` (adds if absent, removes if present).
     /// Triggers a layout rebuild so truncation is recomputed.

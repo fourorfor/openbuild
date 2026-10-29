@@ -3135,3 +3135,104 @@ fn agent_ref(app: &AppView, id: AgentId) -> &AgentView {
     };
     agent
 }
+
+#[test]
+fn subagent_command_lists_children_with_indexes_and_ids() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .subagent_sessions
+            .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
+        agent
+            .subagent_sessions
+            .insert("child-2".into(), make_test_subagent("child-2", "sa-2"));
+    }
+    let before = agent_scrollback_len(&app);
+
+    let effects = dispatch(Action::SubagentCommand { target: None }, &mut app);
+
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let text = last_system_text(&app, id);
+    assert!(text.contains("Subagents (2):"), "got: {text:?}");
+    assert!(text.contains("#1"), "got: {text:?}");
+    assert!(text.contains("#2"), "got: {text:?}");
+    assert!(text.contains("child-1"), "the list prints the openable id");
+    assert!(text.contains("child-2"), "the list prints the openable id");
+}
+
+#[test]
+fn subagent_command_without_children_toasts_instead_of_committing_a_block() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = agent_scrollback_len(&app);
+
+    let effects = dispatch(Action::SubagentCommand { target: None }, &mut app);
+
+    assert!(effects.is_empty());
+    assert_eq!(agent_scrollback_len(&app), before, "no list to show");
+    let toast = test_agent(&app, id)
+        .toast
+        .as_ref()
+        .map(|(text, _)| text.clone());
+    assert!(
+        toast.as_deref().is_some_and(|text| text.contains("no subagents")),
+        "got {toast:?}"
+    );
+}
+
+#[test]
+fn subagent_command_opens_a_child_by_index_and_by_id() {
+    for target in ["#1", "1", "child-1"] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent
+                .subagent_sessions
+                .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
+            agent.insert_test_child(
+                "child-1".into(),
+                Box::new(crate::app::agent_view::test_fixtures::make_agent()),
+            );
+        }
+
+        let effects = dispatch(
+            Action::SubagentCommand {
+                target: Some(target.into()),
+            },
+            &mut app,
+        );
+
+        assert!(effects.is_empty(), "got: {effects:?}");
+        assert_eq!(
+            test_agent(&app, id).active_subagent.as_deref(),
+            Some("child-1"),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn subagent_command_reports_an_unknown_target() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(
+        Action::SubagentCommand {
+            target: Some("nope".into()),
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(test_agent(&app, id).active_subagent.is_none());
+    let toast = test_agent(&app, id)
+        .toast
+        .as_ref()
+        .map(|(text, _)| text.clone());
+    assert!(
+        toast.as_deref().is_some_and(|text| text.contains("No subagent matches")),
+        "got {toast:?}"
+    );
+}

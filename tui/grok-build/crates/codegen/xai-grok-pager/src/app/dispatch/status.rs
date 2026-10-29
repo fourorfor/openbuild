@@ -492,6 +492,46 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// `/subagent`: list this session's subagents, or open one by index / child session id.
+///
+/// The list is committed as a system block so it stays in the transcript (minimal mode has no dock), and the ids
+/// it prints are exactly what `/subagent <id>` accepts. Opening goes through the normal takeover path, so the
+/// replay, thinking reveal and missing-view toast all apply.
+pub(super) fn dispatch_subagent_command(app: &mut AppView, target: Option<&str>) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
+        match crate::app::status_blocks::subagent_list_text(agent) {
+            Some(text) => {
+                agent.scrollback.push_block(RenderBlock::system(text));
+            }
+            None => agent.show_toast("This session has no subagents yet"),
+        }
+        return vec![];
+    };
+    let rows = crate::app::status_blocks::subagent_rows(agent);
+    // Accept `#2` as well as `2` so the printed index can be typed back verbatim.
+    let index = target.strip_prefix('#').unwrap_or(target).parse::<usize>().ok();
+    let child_sid = index
+        .and_then(|wanted| rows.iter().find(|row| row.index == wanted))
+        .or_else(|| rows.iter().find(|row| row.child_session_id == target))
+        .map(|row| row.child_session_id.clone());
+    let Some(child_sid) = child_sid else {
+        agent.show_toast("No subagent matches that index or session id");
+        return vec![];
+    };
+    if !agent.subagent_views.contains_key(&child_sid) {
+        agent.show_toast("That subagent's view was released; its transcript is unavailable");
+        return vec![];
+    }
+    agent.open_subagent_fullscreen(child_sid);
+    vec![]
+}
+
 /// Open the hidden `/gboom` easter egg as a modal over the active agent view.
 /// Requires a graphics-capable terminal (kitty protocol or iTerm2); otherwise a toast explains why nothing happened.
 /// On session-less views (dashboard, welcome) this is a silent no-op.

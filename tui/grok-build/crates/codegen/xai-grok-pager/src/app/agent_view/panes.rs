@@ -65,6 +65,14 @@ impl AgentView {
         if action == Some(ActionId::OpenBlockViewer) && self.try_open_child_from_selected_row() {
             return InputOutcome::Changed;
         }
+        // Enter on a collapsed group header that folds exactly one subagent goes straight into it, the keyboard
+        // twin of the double-click gesture (the member row is hidden, so the header is the only target).
+        if action == Some(ActionId::OpenBlockViewer)
+            && self.scrollback.is_selected_group_header()
+            && self.open_only_child_in_selected_group()
+        {
+            return InputOutcome::Changed;
+        }
         if self.vim_mode
             && key!('x').matches(key)
             && !self.scrollback.is_selected_group_header()

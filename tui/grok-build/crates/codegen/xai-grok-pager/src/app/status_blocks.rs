@@ -260,6 +260,79 @@ fn join_header_rows(header: String, rows: Vec<String>) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// One subagent as `/subagent` lists it: stable index, state, type, description, and the child id to type back.
+pub(crate) struct SubagentListRow {
+    pub index: usize,
+    pub child_session_id: String,
+    pub text: String,
+}
+
+/// Rows for `/subagent`, ordered running-first then newest-first so the interesting child is `#1`.
+///
+/// `openable` marks the children this view can actually take over; a row whose view was evicted is listed as
+/// `unavailable` instead of silently disappearing from the list.
+pub(crate) fn subagent_rows(agent: &AgentView) -> Vec<SubagentListRow> {
+    let mut infos: Vec<_> = agent
+        .subagent_sessions
+        .values()
+        .filter(|info| info.attempt.workflow_run_id.is_none())
+        .collect();
+    infos.sort_by(|a, b| {
+        b.is_running()
+            .cmp(&a.is_running())
+            .then(b.attempt.started_at.cmp(&a.attempt.started_at))
+            .then(a.child_session_id.cmp(&b.child_session_id))
+    });
+    infos
+        .into_iter()
+        .enumerate()
+        .map(|(offset, info)| {
+            let (type_label, desc) = format_subagent_label(info);
+            let status = if info.attempt.pending_kill {
+                "stopping"
+            } else if info.is_running() {
+                "running"
+            } else {
+                info.attempt.status.as_deref().unwrap_or("done")
+            };
+            let label = if desc.is_empty() {
+                type_label
+            } else {
+                format!("{type_label} · {desc}")
+            };
+            let openable = agent.subagent_views.contains_key(&*info.child_session_id);
+            let availability = if openable { "openable" } else { "unavailable" };
+            SubagentListRow {
+                index: offset + 1,
+                child_session_id: info.child_session_id.to_string(),
+                text: format!(
+                    "  #{:<2} {status:<9}{label}  [{}]  ({}, {availability})",
+                    offset + 1,
+                    info.child_session_id,
+                    format_duration(info.display_elapsed())
+                ),
+            }
+        })
+        .collect()
+}
+
+/// `/subagent` body. `None` when this session never spawned a subagent.
+pub(crate) fn subagent_list_text(agent: &AgentView) -> Option<String> {
+    let rows = subagent_rows(agent);
+    if rows.is_empty() {
+        return None;
+    }
+    let header = format!(
+        "Subagent{} ({}):",
+        if rows.len() == 1 { "" } else { "s" },
+        rows.len()
+    );
+    Some(join_header_rows(
+        header,
+        rows.into_iter().map(|row| row.text).collect(),
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

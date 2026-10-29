@@ -1132,9 +1132,15 @@ impl AgentView {
 
         // Double-click on a group header expands or collapses the group
         // Both expand ("N more") and collapse ("▾ N tool calls") headers are standalone entries with their own index
+        // Exception: a collapsed header whose group hides exactly one subagent opens that child instead. The child row
+        // itself is at height 0 behind the header, so without this the header is the only way in and double-click
+        // would just expand the group.
         let is_group_header = self.scrollback.is_selected_group_header();
         if is_group_header {
             if click_count == 2 {
+                if self.open_only_child_in_selected_group() {
+                    return (None, show_word_select_tip);
+                }
                 self.scrollback.toggle_group_expansion();
                 return (None, show_word_select_tip);
             }
