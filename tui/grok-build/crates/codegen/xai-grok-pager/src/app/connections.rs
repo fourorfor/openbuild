@@ -85,6 +85,14 @@ pub struct ConnectionHandle {
     pub spec: ProfileSpec,
     /// Whether the kernel is still reachable (cleared by the death path).
     pub alive: bool,
+    /// This connection's read-only HTTP event stream, when the kernel advertised
+    /// one. Optional by design: the ACP path is complete without it, and
+    /// `OPENBUILD_HTTP_FEED=0` turns it off.
+    ///
+    /// Holding it here (rather than in one loop-local `Option`) is what lets
+    /// each pane keep its own feed: the event loop drains every entry instead of
+    /// only the primary's.
+    pub http_feed: Option<openbuild_backend::http_feed::HttpFeed>,
     /// Cancellation token for this connection's kernel process.
     ///
     /// Dropping a handle is not enough to stop a child process: the bridge
@@ -107,6 +115,7 @@ impl ConnectionHandle {
             profile,
             spec,
             alive: true,
+            http_feed: None,
             cancel: None,
         }
     }

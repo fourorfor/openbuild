@@ -101,7 +101,8 @@ async fn main() -> Result<()> {
     };
     println!("auth:     {auth_prefix}…");
 
-    let first = tokio::time::timeout(Duration::from_secs(15), feed.events.recv())
+    let events = feed.take_events().expect("events");
+    let first = tokio::time::timeout(Duration::from_secs(15), events.recv())
         .await
         .context("no event arrived within 15s")?;
     let first = first.context("the event stream closed without sending anything")?;
@@ -125,7 +126,7 @@ async fn main() -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut saw_session = false;
     while tokio::time::Instant::now() < deadline {
-        let event = tokio::time::timeout_at(deadline, feed.events.recv()).await;
+        let event = tokio::time::timeout_at(deadline, events.recv()).await;
         let Ok(Some(event)) = event else {
             break;
         };

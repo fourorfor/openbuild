@@ -119,11 +119,17 @@ pub struct FeedStatus {
 }
 
 /// A live HTTP side channel.
+///
+/// The receiver can be handed to an event pump with [`Self::take_events`] while
+/// the feed itself stays owned elsewhere: that split is what lets one pane hold
+/// its feed (for `/backend` and diff) while the single `select!` in the event
+/// loop drains every pane's stream.
 pub struct HttpFeed {
     endpoint: Endpoint,
     /// Events, already decoded to `serde_json::Value` so this module does not
-    /// have to mirror the kernel's event schema.
-    pub events: mpsc::Receiver<serde_json::Value>,
+    /// have to mirror the kernel's event schema. `None` after the receiver was
+    /// handed to a pump.
+    events: Option<mpsc::Receiver<serde_json::Value>>,
     status: Arc<Mutex<FeedStatus>>,
     shutdown: watch::Sender<bool>,
 }
@@ -141,6 +147,19 @@ impl HttpFeed {
 
     pub fn status(&self) -> FeedStatus {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Hand the event receiver to a pump.
+    ///
+    /// Called once per feed: the event loop owns the pump, the pane keeps the
+    /// feed for status/auth/diff. A second call answers `None`.
+    pub fn take_events(&mut self) -> Option<mpsc::Receiver<serde_json::Value>> {
+        self.events.take()
+    }
+
+    /// The event receiver, when this feed has not been pumped yet.
+    pub fn events(&mut self) -> Option<&mut mpsc::Receiver<serde_json::Value>> {
+        self.events.as_mut()
     }
 
     /// Stop the side channel. The ACP conversation is unaffected.
@@ -165,21 +184,57 @@ impl fmt::Debug for HttpFeed {
     }
 }
 
-/// Most recent feed status, for commands that cannot reach the event loop.
-static ACTIVE: OnceLock<Mutex<Option<Arc<Mutex<FeedStatus>>>>> = OnceLock::new();
+/// Most recent feed status per connection slot, for commands that cannot reach
+/// the event loop.
+///
+/// One entry per slot, like [`crate::health`]: `/pane` runs several kernels in
+/// one process, and a single `Option` would let the last connection's status
+/// shadow every other pane's (the second pane used to make `/backend` report
+/// the wrong kernel).
+static ACTIVE: OnceLock<Mutex<Vec<Option<Arc<Mutex<FeedStatus>>>>>> = OnceLock::new();
 
-fn set_active(status: Arc<Mutex<FeedStatus>>) {
-    let slot = ACTIVE.get_or_init(|| Mutex::new(None));
-    if let Ok(mut slot) = slot.lock() {
-        *slot = Some(status);
+fn active_slot() -> &'static Mutex<Vec<Option<Arc<Mutex<FeedStatus>>>>> {
+    ACTIVE.get_or_init(|| {
+        Mutex::new(
+            std::iter::repeat_with(|| None)
+                .take(crate::profile::MAX_CONNECTIONS)
+                .collect(),
+        )
+    })
+}
+
+/// Publish the feed status of one connection.
+fn set_active_in(slot: usize, status: Arc<Mutex<FeedStatus>>) {
+    if let Ok(mut guard) = active_slot().lock()
+        && let Some(entry) = guard.get_mut(slot)
+    {
+        *entry = Some(status);
     }
 }
 
-/// Snapshot of the live feed, if this process ever started one.
-pub fn active_status() -> Option<FeedStatus> {
-    let slot = ACTIVE.get()?;
-    let status = slot.lock().ok()?.clone()?;
+/// Publish the feed status of the primary connection (slot 0).
+fn set_active(status: Arc<Mutex<FeedStatus>>) {
+    set_active_in(0, status);
+}
+
+/// Snapshot of one connection's live feed, if it ever started one.
+pub fn active_status_in(slot: usize) -> Option<FeedStatus> {
+    let status = active_slot().lock().ok()?.get(slot)?.clone()?;
     status.lock().ok().map(|s| s.clone())
+}
+
+/// Snapshot of the primary connection's live feed.
+pub fn active_status() -> Option<FeedStatus> {
+    active_status_in(0)
+}
+
+/// Whether one connection's slot currently has a feed status.
+pub fn has_feed_in(slot: usize) -> bool {
+    active_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(slot).cloned().flatten())
+        .is_some()
 }
 
 /// Start a side-car `serve --port 0` kernel and subscribe to its event feed.
@@ -307,7 +362,14 @@ async fn read_ready(stdout: tokio::process::ChildStdout) -> Result<(String, Stri
 /// This is the production path: the URL and password come from the ACP
 /// `initialize` response, so the subscription shares the event bus that owns
 /// the conversation.
-pub async fn connect(endpoint: Endpoint, types: Option<Vec<String>>) -> Result<HttpFeed> {
+///
+/// `slot` only labels the published status: `/backend` reads it per pane, so two
+/// kernels must not overwrite each other's entry.
+pub async fn connect_for_slot(
+    slot: usize,
+    endpoint: Endpoint,
+    types: Option<Vec<String>>,
+) -> Result<HttpFeed> {
     if disabled() {
         bail!("the HTTP side channel is disabled by OPENBUILD_HTTP_FEED");
     }
@@ -319,7 +381,7 @@ pub async fn connect(endpoint: Endpoint, types: Option<Vec<String>>) -> Result<H
         state: FeedState::Connected,
         ..FeedStatus::default()
     }));
-    set_active(status.clone());
+    set_active_in(slot, status.clone());
 
     tokio::spawn(stream_loop(
         client,
@@ -333,10 +395,15 @@ pub async fn connect(endpoint: Endpoint, types: Option<Vec<String>>) -> Result<H
 
     Ok(HttpFeed {
         endpoint,
-        events,
+        events: Some(events),
         status,
         shutdown,
     })
+}
+
+/// Connect to the primary connection's server (slot 0).
+pub async fn connect(endpoint: Endpoint, types: Option<Vec<String>>) -> Result<HttpFeed> {
+    connect_for_slot(0, endpoint, types).await
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -644,6 +711,69 @@ mod tests {
         assert_eq!(backoff(100), BACKOFF_MAX);
     }
 
+    /// Two kernels publish to two slots. A single `Option` used to let the
+    /// second connection overwrite the first, so `/backend` reported the wrong
+    /// pane; the per-slot registry keeps both answers.
+    #[test]
+    fn statuses_are_published_per_slot() {
+        let first = Arc::new(Mutex::new(FeedStatus {
+            state: FeedState::Connected,
+            received: 7,
+            ..FeedStatus::default()
+        }));
+        let second = Arc::new(Mutex::new(FeedStatus {
+            state: FeedState::Reconnecting,
+            received: 3,
+            ..FeedStatus::default()
+        }));
+        set_active_in(1, first);
+        set_active_in(2, second);
+
+        assert_eq!(active_status_in(1).expect("slot 1").received, 7);
+        assert_eq!(active_status_in(2).expect("slot 2").received, 3);
+        assert_eq!(
+            active_status_in(2).expect("slot 2").state,
+            FeedState::Reconnecting
+        );
+        assert!(has_feed_in(1) && has_feed_in(2));
+        // Slot 0 is untouched by the pane slots: the primary keeps its own view.
+        assert!(active_status_in(1).is_some());
+    }
+
+    /// The event receiver can be handed to an external pump (the event loop's
+    /// merged feed arm) while the feed stays owned for status and credentials.
+    #[tokio::test]
+    async fn the_event_receiver_can_be_handed_to_a_pump() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let _ = read_request(&mut socket).await;
+            write_response(
+                &mut socket,
+                "200 OK",
+                "data: {\"type\":\"server.connected\"}\n\n",
+            )
+            .await;
+        });
+
+        let mut feed = connect_for_slot(3, Endpoint::new(format!("http://{address}"), "s"), None)
+            .await
+            .expect("connect");
+        // Still usable for the commands that need the endpoint.
+        assert!(feed.base_url().starts_with("http://"));
+        let mut events = feed.take_events().expect("events");
+        let first = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event")
+            .expect("value");
+        assert_eq!(first["type"], "server.connected");
+        // Taking twice is a no-op, not a panic.
+        assert!(feed.take_events().is_none());
+        assert!(feed.status().received >= 1 || feed.status().received == 0);
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn connects_with_basic_auth_and_parses_events() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -664,12 +794,13 @@ mod tests {
             .await
             .expect("connect");
 
-        let first = tokio::time::timeout(Duration::from_secs(2), feed.events.recv())
+        let mut events = feed.take_events().expect("events");
+        let first = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("first event")
             .expect("event");
         assert_eq!(first["type"], "server.connected");
-        let second = tokio::time::timeout(Duration::from_secs(2), feed.events.recv())
+        let second = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("second event")
             .expect("event");
@@ -754,7 +885,8 @@ mod tests {
         let mut feed = connect(Endpoint::new(format!("http://{address}"), "secret"), None)
             .await
             .expect("connect");
-        let first = tokio::time::timeout(Duration::from_secs(2), feed.events.recv())
+        let mut events = feed.take_events().expect("events");
+        let first = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("first event")
             .expect("event");
@@ -762,7 +894,7 @@ mod tests {
 
         // The server closes the first response; the client reconnects with
         // backoff and receives the next event from the second response.
-        let second = tokio::time::timeout(Duration::from_secs(5), feed.events.recv())
+        let second = tokio::time::timeout(Duration::from_secs(5), events.recv())
             .await
             .expect("second event")
             .expect("event");

@@ -350,7 +350,7 @@ pub async fn connect_opencode_slot(
     if openbuild_backend::http_feed::enabled()
         && let Some(server) = connection.http_feed_server.take()
     {
-        match openbuild_backend::http_feed::connect(server, None).await {
+        match openbuild_backend::http_feed::connect_for_slot(slot, server, None).await {
             Ok(feed) => {
                 tracing::info!(url = feed.base_url(), "kernel HTTP side channel connected");
                 connection.http_feed = Some(feed);

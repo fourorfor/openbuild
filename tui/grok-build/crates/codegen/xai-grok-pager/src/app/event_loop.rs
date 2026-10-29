@@ -1383,17 +1383,107 @@ fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool 
         && matches!(app.active_view, ActiveView::Welcome)
         && !app.is_zdr_blocked()
 }
-/// Wait for one event from the optional HTTP side channel.
+/// One decoded event from any connection's HTTP side channel.
+struct FeedEvent {
+    /// Connection slot that received it.
+    slot: usize,
+    value: serde_json::Value,
+}
+
+/// Merge every connection's read-only event stream into the one `select!` arm.
 ///
-/// A missing feed parks the future forever so `select!` can keep the branch
-/// unconditional; a closed feed returns `None` and the caller drops the feed.
-async fn next_http_feed_event(
-    feed: &mut Option<openbuild_backend::http_feed::HttpFeed>,
-) -> Option<serde_json::Value> {
-    match feed {
-        Some(feed) => feed.events.recv().await,
-        None => std::future::pending().await,
+/// `/pane` runs several kernels, each with its own feed; a single loop-local
+/// `Option<HttpFeed>` could only ever drain one of them and the other panes'
+/// events were silently dropped. Each feed gets a forwarder task into this
+/// channel, mirroring [`super::acp_mux::AcpMux`], so no pane can starve another.
+///
+/// The feed itself lives *inside* its forwarder: aborting the task drops it, and
+/// `HttpFeed::drop` shuts the subscription down. That is what keeps a closed
+/// pane from leaking a connection.
+struct FeedMux {
+    tx: tokio::sync::mpsc::UnboundedSender<FeedEvent>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<FeedEvent>,
+    forwarders: std::collections::HashMap<usize, tokio::task::AbortHandle>,
+}
+
+impl FeedMux {
+    fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx,
+            forwarders: std::collections::HashMap::new(),
+        }
     }
+
+    /// Pump one connection's event receiver into the merged stream, replacing any
+    /// previous one for that slot (a reconnect or a reopened pane).
+    ///
+    /// Only the receiver is moved here: the [`HttpFeed`] itself stays owned by
+    /// the pane's [`super::connections::ConnectionHandle`], so `/backend` and the
+    /// diff command can still read its endpoint and status.
+    fn attach(
+        &mut self,
+        slot: usize,
+        events: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    ) {
+        self.detach(slot);
+        let mut events = events;
+        let tx = self.tx.clone();
+        let task = tokio::spawn(async move {
+            while let Some(value) = events.recv().await {
+                if tx.send(FeedEvent { slot, value }).is_err() {
+                    return;
+                }
+            }
+        });
+        self.forwarders.insert(slot, task.abort_handle());
+    }
+
+    /// Take the receiver out of `feed` and pump it, if the feed still has one.
+    fn attach_feed(&mut self, slot: usize, feed: &mut openbuild_backend::http_feed::HttpFeed) {
+        if let Some(events) = feed.take_events() {
+            self.attach(slot, events);
+        }
+    }
+
+    /// Stop one connection's feed. No event is emitted: the caller is already
+    /// handling the change.
+    fn detach(&mut self, slot: usize) {
+        if let Some(abort) = self.forwarders.remove(&slot) {
+            abort.abort();
+        }
+    }
+
+    /// Whether any feed is live. `/backend` and diagnostics use the per-slot
+    /// status; this only answers "is the merged arm worth polling".
+    fn is_empty(&self) -> bool {
+        self.forwarders.is_empty()
+    }
+
+    async fn recv(&mut self) -> Option<FeedEvent> {
+        self.rx.recv().await
+    }
+}
+
+/// Wait for one event from the merged HTTP side channel.
+///
+/// An empty mux parks the future forever so `select!` can keep the branch
+/// unconditional; a closed channel returns `None` and the caller keeps running.
+async fn next_http_feed_event(mux: &mut FeedMux) -> Option<FeedEvent> {
+    if mux.is_empty() {
+        return std::future::pending().await;
+    }
+    mux.recv().await
+}
+
+/// Apply one read-only HTTP feed event.
+///
+/// The feed is an enhancement, never the authority: anything it carries here is
+/// a snapshot for display. Session state, tool terminal states and diff
+/// correctness all still come from ACP.
+fn handle_feed_event(app: &mut AppView, slot: usize, kind: &str, value: &serde_json::Value) {
+    let _ = (app, slot, kind, value);
 }
 
 /// Pop one merged ACP message without losing a close notice.
@@ -1611,13 +1701,16 @@ pub(crate) async fn run(
     // The primary connection is also slot 0 of the connection registry, so
     // `/backend`, `/pane` and per-pane request routing all read one place.
     let primary_spec = super::connections::ProfileSpec::new("", app_primary_workspace());
-    let primary_handle = super::connections::ConnectionHandle::new(
+    let mut primary_handle = super::connections::ConnectionHandle::new(
         super::connections::ConnectionId::PRIMARY,
         connection.tx.clone(),
         connection.models.clone(),
         connection.profile.clone(),
         primary_spec,
     );
+    // Slot 0 keeps its feed in its handle from the start, exactly like a pane
+    // does. The event loop then takes the receiver out for the merged pump.
+    primary_handle.http_feed = connection.http_feed;
     let mut app = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.app_init.app_view_new");
         AppView::new(
@@ -2224,9 +2317,21 @@ pub(crate) async fn run(
     let mut acp_mux = super::acp_mux::AcpMux::new(connection.rx);
     let mut connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
-    // Optional read-only HTTP side channel. It is drained here so its bounded
-    // queue never backs up; `/backend` reads the live counters.
-    let mut http_feed = connection.http_feed;
+    // Optional read-only HTTP side channels, one per connection. Each one is
+    // drained here so its bounded queue never backs up; `/backend` reads the
+    // per-slot counters. The primary's feed already lives in its handle, so the
+    // pump starts from the registry instead of a loop-local copy.
+    let mut http_feeds = FeedMux::new();
+    {
+        let slot0 = super::connections::ConnectionId::PRIMARY;
+        if let Some(feed) = app
+            .connections
+            .get_mut(&slot0)
+            .and_then(|handle| handle.http_feed.as_mut())
+        {
+            http_feeds.attach_feed(0, feed);
+        }
+    }
     // One normalizer per connection: it latches child-session spawn/finish so a
     // `task` subagent is announced once and then routed to its own view.
     let mut normalizer = openbuild_backend::adapter::Normalizer::new();
@@ -3033,20 +3138,21 @@ pub(crate) async fn run(
                 }
             }
 
-            // Optional read-only HTTP side channel. Drain one event per pass so
-            // its bounded queue never backs up; the ACP arm above remains the
-            // authoritative path for everything that changes session state.
-            event = next_http_feed_event(&mut http_feed) => {
-                if let Some(event) = event {
-                    let kind = event
+            // Optional read-only HTTP side channels, merged across connections.
+            // Drain one event per pass so no bounded queue backs up; the ACP arm
+            // above remains the authoritative path for session state.
+            event = next_http_feed_event(&mut http_feeds) => {
+                if let Some(FeedEvent { slot, value }) = event {
+                    let kind = value
                         .get("type")
                         .and_then(|value| value.as_str())
                         .unwrap_or("event");
-                    tracing::trace!(kind, "http feed event");
+                    tracing::trace!(slot, kind, "http feed event");
+                    handle_feed_event(&mut app, slot, kind, &value);
                 } else {
                     // Shutdown or a fatal stream error. The TUI keeps running;
-                    // `/backend` reports the stopped feed.
-                    http_feed = None;
+                    // `/backend` reports the stopped feed for that slot.
+                    tracing::debug!("http feed channel closed");
                 }
             }
 
@@ -3706,6 +3812,13 @@ pub(crate) async fn run(
                 let cancel = conn.cancel.clone();
                 let mut handle = handle;
                 handle.cancel = Some(cancel);
+                // Keep this pane's feed instead of dropping it, and hand its
+                // receiver to the merged pump. The feed stays in the handle so
+                // `/backend` and `/diff` can reach this pane's own endpoint.
+                handle.http_feed = conn.http_feed;
+                if let Some(feed) = handle.http_feed.as_mut() {
+                    http_feeds.attach_feed(connection.0, feed);
+                }
                 app.connections.insert(connection, handle);
                 acp_mux.attach(connection.0, conn.rx);
                 // The left column is whatever the user was looking at. It has
@@ -3815,10 +3928,20 @@ pub(crate) async fn run(
                 for agent in app.agents.values_mut() {
                     agent.reset_event_highwaters_for_new_kernel();
                 }
-                // The old feed points at the dead kernel's server. Drop it and
-                // adopt the new connection's feed, if the new kernel advertised
-                // one.
-                http_feed = conn.http_feed;
+                // The old feed points at the dead kernel's server. Re-attaching
+                // slot 0 aborts the old pump; the new kernel's feed replaces it
+                // in the handle and in the merged stream.
+                if let Some(handle) = app
+                    .connections
+                    .get_mut(&super::connections::ConnectionId::PRIMARY)
+                {
+                    handle.http_feed = conn.http_feed;
+                    if let Some(feed) = handle.http_feed.as_mut() {
+                        http_feeds.attach_feed(0, feed);
+                    } else {
+                        http_feeds.detach(0);
+                    }
+                }
                 // The new kernel re-announces its children; stale spawn/finish
                 // latches from the previous process would swallow them.
                 normalizer.reset();

@@ -55,7 +55,34 @@ pub fn report_for_slot(slot: crate::app::connections::ConnectionId) -> Option<St
         "Proxy: {}",
         openbuild_backend::proxy::describe(openbuild_backend::spawn::active_proxy())
     ));
+    // Each pane has its own feed; reading the process-wide singleton made a
+    // second pane report the primary kernel's counters.
+    lines.extend(feed_lines(openbuild_backend::http_feed::active_status_in(
+        slot.0,
+    )));
     Some(lines.join("\n"))
+}
+
+/// The `HTTP feed:` lines for one status, shared by both report paths.
+fn feed_lines(status: Option<openbuild_backend::http_feed::FeedStatus>) -> Vec<String> {
+    let Some(status) = status else {
+        return vec!["HTTP feed: unavailable for this pane".to_string()];
+    };
+    let mut line = format!(
+        "HTTP feed: {} ({} events, {} dropped, {} reconnects)",
+        status.state.label(),
+        status.received,
+        status.dropped,
+        status.reconnects
+    );
+    if let Some(kind) = status.last_event.as_deref() {
+        line.push_str(&format!(", last: {kind}"));
+    }
+    let mut lines = vec![line];
+    if let Some(error) = status.last_error.as_deref() {
+        lines.push(format!("HTTP feed error: {error}"));
+    }
+    lines
 }
 
 /// Build the user-visible report.
