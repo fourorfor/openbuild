@@ -457,6 +457,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "dashboard",
     "debug",
     "delete",
+    "diff",
     "docs",
     "doctor",
     "dream",

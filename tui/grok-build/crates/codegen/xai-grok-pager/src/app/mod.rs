@@ -21,6 +21,7 @@ pub(crate) mod command_catalog;
 pub mod consent;
 pub mod connections;
 pub(crate) mod pane_render;
+pub(crate) mod diff_view;
 pub(crate) mod deferred_subagent_finishes;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;

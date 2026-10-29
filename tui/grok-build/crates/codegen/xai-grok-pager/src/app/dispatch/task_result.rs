@@ -44,8 +44,8 @@ use super::session::picker_routing::PickerRequest;
 use super::settings::ui::{apply_setting_rollback, refresh_open_settings_modals};
 use super::status::{
     handle_coding_data_sharing_failed, handle_coding_data_sharing_updated,
-    handle_context_info_complete, handle_session_usage_result, toast_persist_failure,
-    usage_modal_state_mut,
+    handle_context_info_complete, handle_session_diff_complete, handle_session_diff_failed,
+    handle_session_usage_result, toast_persist_failure, usage_modal_state_mut,
 };
 use super::transcript::{
     handle_hooks_list_loaded, handle_marketplace_list_loaded, handle_marketplace_updates_available,
@@ -1696,6 +1696,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             format!("Couldn't load session usage: {error}"),
             nonce,
         ),
+        TaskResult::SessionDiffComplete {
+            agent_id,
+            session_id,
+            files,
+        } => handle_session_diff_complete(app, agent_id, &session_id, files),
+        TaskResult::SessionDiffFailed {
+            agent_id,
+            session_id,
+            error,
+        } => handle_session_diff_failed(app, agent_id, &session_id, error),
         TaskResult::FeedbackComplete {
             agent_id,
             origin,

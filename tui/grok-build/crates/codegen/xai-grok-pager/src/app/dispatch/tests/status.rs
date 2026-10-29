@@ -2183,3 +2183,75 @@ fn fetch_failures_surface_in_open_modal() {
     assert_eq!(state.session_error.as_deref(), Some("info boom"));
     assert_eq!(state.context_error.as_deref(), Some("ctx boom"));
 }
+
+/// `/diff` renders one edit block per changed file, and a second identical
+/// answer renders nothing new (the whole point of the dedupe).
+#[test]
+fn session_diff_renders_hunks_and_dedupes_repeats() {
+    let mut app = test_app_with_agent();
+    let files = vec![crate::app::diff_view::SessionDiffFile {
+        path: "src/a.rs".to_string(),
+        patch: "@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n let b = 3;\n".to_string(),
+        additions: 1,
+        deletions: 1,
+        status: Some("modified".to_string()),
+    }];
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionDiffComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            files: files.clone(),
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    let edits = edit_block_count(agent);
+    assert_eq!(edits, 1, "one edit block per changed file");
+
+    // Same session, same patch: no second block.
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionDiffComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            files,
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    let edits = edit_block_count(agent);
+    assert_eq!(edits, 1, "a repeated diff must not stack a second block");
+}
+
+/// A diff for a session the agent has since left is dropped, not appended.
+#[test]
+fn session_diff_for_a_stale_session_is_dropped() {
+    let mut app = test_app_with_agent();
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionDiffComplete {
+            agent_id: AgentId(0),
+            session_id: "some-other-session".into(),
+            files: vec![crate::app::diff_view::SessionDiffFile {
+                path: "src/a.rs".to_string(),
+                patch: "@@ -1 +1 @@\n-x\n+y\n".to_string(),
+                additions: 1,
+                deletions: 1,
+                status: None,
+            }],
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, AgentId(0));
+    let edits = edit_block_count(agent);
+    assert_eq!(edits, 0);
+}
+/// Count edit-tool blocks in an agent's scrollback.
+fn edit_block_count(agent: &AgentView) -> usize {
+    (0..agent.scrollback.len())
+        .filter(|index| {
+            agent
+                .scrollback
+                .get(*index)
+                .is_some_and(|entry| matches!(entry.block, RenderBlock::ToolCall(ToolCallBlock::Edit(_))))
+        })
+        .count()
+}

@@ -650,6 +650,7 @@ pub(super) fn handle_session_notification_with_origin(
                     compact_held_prompt: None,
                     current_prompt_id: None,
                     created_via_new: false,
+                    displayed_diffs: std::collections::HashSet::new(),
                     backend_mode_label: None,
                 };
                 let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();

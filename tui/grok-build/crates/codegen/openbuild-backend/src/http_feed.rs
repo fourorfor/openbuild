@@ -149,6 +149,35 @@ impl HttpFeed {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// `GET /api/session/:sessionID/diff?context=N` on this connection's server.
+    ///
+    /// This is the **only** way to get the per-turn diff: `session.diff` is not on
+    /// the events stream (it lives in the legacy `SessionV1` schema and has no
+    /// publisher), so waiting for an event would wait forever.
+    ///
+    /// Reuses the SSE client on purpose: it is `no_proxy()` and only sets a
+    /// connect timeout. A fresh client with a total timeout would be the same
+    /// mistake the old `timeout(ZERO)` path made.
+    pub async fn session_diff(
+        &self,
+        session_id: &str,
+        context: u32,
+    ) -> Result<Vec<SessionFileDiff>> {
+        self.client_handle().session_diff(session_id, context).await
+    }
+
+    /// A cloneable handle for one-off requests.
+    ///
+    /// The event loop must be able to await a request without borrowing the
+    /// `HttpFeed` stored in a connection handle (it also holds the event
+    /// receiver), so the endpoint and status are handed out separately.
+    pub fn client_handle(&self) -> FeedClient {
+        FeedClient {
+            endpoint: self.endpoint.clone(),
+            status: self.status.clone(),
+        }
+    }
+
     /// Hand the event receiver to a pump.
     ///
     /// Called once per feed: the event loop owns the pump, the pane keeps the
@@ -182,6 +211,138 @@ impl fmt::Debug for HttpFeed {
             .field("status", &self.status())
             .finish_non_exhaustive()
     }
+}
+
+/// A cloneable handle to one connection's side channel, for request/response
+/// calls (the diff endpoint) that must not borrow the feed itself.
+#[derive(Clone)]
+pub struct FeedClient {
+    endpoint: Endpoint,
+    status: Arc<Mutex<FeedStatus>>,
+}
+
+impl fmt::Debug for FeedClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `Endpoint` holds the lease password, so it is never printed.
+        f.debug_struct("FeedClient")
+            .field("base_url", &self.endpoint.base_url)
+            .field("status", &self.status())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FeedClient {
+    /// Base URL this handle talks to.
+    pub fn base_url(&self) -> &str {
+        &self.endpoint.base_url
+    }
+
+    /// Snapshot of the feed's counters.
+    pub fn status(&self) -> FeedStatus {
+        self.status.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// `GET /api/session/:sessionID/diff?context=N`.
+    pub async fn session_diff(
+        &self,
+        session_id: &str,
+        context: u32,
+    ) -> Result<Vec<SessionFileDiff>> {
+        let client = client()?;
+        let url = format!(
+            "{}/api/session/{}/diff?context={}",
+            self.endpoint.base_url.trim_end_matches('/'),
+            urlencode_path_segment(session_id),
+            context
+        );
+        let response = client
+            .get(url)
+            .header(reqwest::header::AUTHORIZATION, self.endpoint.auth_header())
+            .send()
+            .await
+            .context("request the session diff")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read the session diff response")?;
+        if !status.is_success() {
+            bail!("session diff failed with {status}: {}", body.trim());
+        }
+        parse_session_diff(&body)
+    }
+}
+
+/// One entry of `GET /api/session/:id/diff`.
+///
+/// Mirrors `FileDiff.Info` from the kernel's protocol: `file`, `patch` and
+/// `status` are always present, the counts may be zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct SessionFileDiff {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub patch: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl SessionFileDiff {
+    /// The path to show: the reported file, else the `+++ b/…` header, else a
+    /// stable placeholder so a malformed entry still renders instead of vanishing.
+    pub fn display_path(&self) -> String {
+        if !self.file.trim().is_empty() {
+            return self.file.clone();
+        }
+        for line in self.patch.lines() {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                let rest = rest.trim();
+                let rest = rest.strip_prefix("b/").unwrap_or(rest);
+                if !rest.is_empty() && rest != "/dev/null" {
+                    return rest.to_string();
+                }
+            }
+        }
+        "(unknown file)".to_string()
+    }
+}
+
+/// Decode the `{ data: [...] }` envelope the server answers with.
+///
+/// Also accepts a bare array, and skips entries that are not objects, so a shape
+/// change degrades to "no diff" instead of failing the whole pane.
+pub fn parse_session_diff(body: &str) -> Result<Vec<SessionFileDiff>> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("the session diff response was not JSON")?;
+    let array = value
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| value.clone());
+    let Some(items) = array.as_array() else {
+        bail!("the session diff response had no data array");
+    };
+    Ok(items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<SessionFileDiff>(item.clone()).ok())
+        .collect())
+}
+
+/// Percent-encode a path segment (session ids are `ses_…`, but never assume it).
+fn urlencode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Most recent feed status per connection slot, for commands that cannot reach
@@ -709,6 +870,31 @@ mod tests {
     fn backoff_is_capped() {
         assert_eq!(backoff(0), BACKOFF_START);
         assert_eq!(backoff(100), BACKOFF_MAX);
+    }
+
+    /// The kernel answers `{ data: [FileDiff.Info] }`; a bare array is accepted
+    /// too, and entries without `patch` must not kill the whole list.
+    #[test]
+    fn session_diff_parses_the_data_envelope() {
+        let body = r#"{"data":[
+            {"file":"src/a.rs","patch":"@@ -1 +1 @@\n-x\n+y\n","additions":1,"deletions":1,"status":"modified"},
+            {"patch":"--- a/b.rs\n+++ b/b.rs\n","status":"added"}
+        ]}"#;
+        let diffs = parse_session_diff(body).expect("parsed");
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].file, "src/a.rs");
+        assert_eq!(diffs[0].additions, 1);
+        assert_eq!(diffs[1].file, "");
+        // No `file` field: fall back to the patch header.
+        assert_eq!(diffs[1].display_path(), "b.rs");
+    }
+
+    #[test]
+    fn session_diff_tolerates_a_bare_array_and_rejects_non_json() {
+        let diffs = parse_session_diff(r#"[{"file":"a","patch":""}]"#).expect("bare array");
+        assert_eq!(diffs.len(), 1);
+        assert!(parse_session_diff("not json").is_err());
+        assert!(parse_session_diff(r#"{"error":"boom"}"#).is_err());
     }
 
     /// Two kernels publish to two slots. A single `Option` used to let the

@@ -680,6 +680,91 @@ pub(super) fn handle_context_info_complete(
     vec![]
 }
 
+/// Render a fetched session diff.
+///
+/// One block per file, using the existing `edit_with_hunks` renderer, so the
+/// diff looks like an edit tool call instead of a second bespoke format. Results
+/// for a session that is no longer open are dropped, and the same
+/// `(session, file, patch)` is never rendered twice.
+pub(super) fn handle_session_diff_complete(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    files: Vec<crate::app::diff_view::SessionDiffFile>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.as_ref() != Some(session_id) {
+        return vec![];
+    }
+    if files.is_empty() {
+        push_and_page_flip(
+            &mut agent.scrollback,
+            crate::scrollback::block::RenderBlock::system(
+                "No file changes recorded for this session.".to_string(),
+            ),
+        );
+        return vec![];
+    }
+    let pending = crate::app::diff_view::undisplayed(
+        &session_id.0,
+        &files,
+        &agent.session.displayed_diffs,
+    );
+    if pending.is_empty() {
+        push_and_page_flip(
+            &mut agent.scrollback,
+            crate::scrollback::block::RenderBlock::system(
+                "Diff unchanged since the last /diff.".to_string(),
+            ),
+        );
+        return vec![];
+    }
+    for file in &pending {
+        let hunks = xai_grok_pager_diff::diff_hunks_from_patch(&file.patch);
+        if hunks.is_empty() {
+            // A file header with no hunks (mode change, empty file) has nothing
+            // to paint; say so instead of rendering an empty edit block.
+            push_and_page_flip(
+                &mut agent.scrollback,
+                crate::scrollback::block::RenderBlock::system(
+                    crate::app::diff_view::diff_summary(file),
+                ),
+            );
+            continue;
+        }
+        push_and_page_flip(
+            &mut agent.scrollback,
+            crate::scrollback::block::RenderBlock::edit_with_hunks(file.path.clone(), hunks),
+        );
+    }
+    crate::app::diff_view::mark_displayed(&session_id.0, &pending, &mut agent.session.displayed_diffs);
+    vec![]
+}
+
+/// Report a failed diff pull.
+pub(super) fn handle_session_diff_failed(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    error: String,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.as_ref() != Some(session_id) {
+        return vec![];
+    }
+    push_and_page_flip(
+        &mut agent.scrollback,
+        crate::scrollback::block::RenderBlock::system(format!(
+            "Couldn't load the session diff: {error}"
+        )),
+    );
+    vec![]
+}
+
 // Action handlers.
 
 pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<Effect> {

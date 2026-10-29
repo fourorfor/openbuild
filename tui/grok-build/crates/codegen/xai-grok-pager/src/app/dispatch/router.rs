@@ -829,6 +829,35 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             );
             vec![]
         }
+        Action::ShowSessionDiff { context } => {
+            // A pull, not a subscription: the loop issues the HTTP request on
+            // the session's own connection, so two panes never cross streams.
+            let Some(agent_id) = app.focused_agent() else {
+                push_pane_notice(app, "No active session".to_string());
+                return vec![];
+            };
+            let session_id = app
+                .agents
+                .get(&agent_id)
+                .and_then(|agent| agent.session.session_id.clone());
+            let Some(session_id) = session_id else {
+                push_pane_notice(
+                    app,
+                    "Session diff is unavailable until the session starts.".to_string(),
+                );
+                return vec![];
+            };
+            if app.diff_request.is_some() {
+                push_pane_notice(app, "A diff is already loading; wait for it.".to_string());
+                return vec![];
+            }
+            app.diff_request = Some(crate::app::diff_view::DiffRequest {
+                agent_id,
+                session_id,
+                context,
+            });
+            vec![]
+        }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
             vec![]

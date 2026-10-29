@@ -392,6 +392,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        displayed_diffs: std::collections::HashSet::new(),
         backend_mode_label: None,
     }
 }
@@ -669,6 +670,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         },
         ScrollbackState::new(),
@@ -833,6 +835,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         },
         ScrollbackState::new(),

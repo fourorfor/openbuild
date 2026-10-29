@@ -163,6 +163,97 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
     hunks
 }
 
+/// Parse a unified diff (the `patch` field of `FileDiff.Info`) back into hunks.
+///
+/// The kernel's `GET /api/session/:id/diff` answers with unified-diff text, while
+/// the pager renders [`DiffHunk`]s. This is the missing direction — the crate
+/// already had hunks → patch (`diff_hunks_to_patch`) and old/new → hunks.
+///
+/// Tolerant by design, because the input is external:
+///
+/// - `---` / `+++` file headers and `\ No newline at end of file` are skipped;
+/// - CRLF line endings are accepted (the kernel writes LF, Windows tools do not);
+/// - an empty or header-only patch yields no hunks instead of a fabricated line;
+/// - a body line without a ` `/`+`/`-` prefix is treated as context, so a stripped
+///   patch still renders instead of panicking.
+///
+/// Line numbers come from the `@@ -old_start,old_len +new_start,new_len @@`
+/// header and advance per tag, so `DiffLine::lo` / `ln` are file line numbers
+/// (1-based), matching what [`build_diff_hunks`] produces.
+pub fn diff_hunks_from_patch(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let mut current: DiffHunk = DiffHunk::new();
+    let mut lo = 0usize;
+    let mut ln = 0usize;
+
+    for raw in patch.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some((start_lo, start_ln)) = parse_hunk_header(line) {
+            if !current.is_empty() {
+                hunks.push(std::mem::take(&mut current));
+            }
+            lo = start_lo;
+            ln = start_ln;
+            continue;
+        }
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if line.starts_with('\\') {
+            // `\ No newline at end of file` is metadata, not content.
+            continue;
+        }
+        if lo == 0 && ln == 0 {
+            // Body text before the first hunk header has nothing to anchor to.
+            continue;
+        }
+        let (tag, text) = match line.as_bytes().first() {
+            Some(b'+') => (ChangeTag::Insert, &line[1..]),
+            Some(b'-') => (ChangeTag::Delete, &line[1..]),
+            Some(b' ') => (ChangeTag::Equal, &line[1..]),
+            // A stripped prefix is the safest reading of a bare line.
+            _ => (ChangeTag::Equal, line),
+        };
+        current.push(DiffLine {
+            text: format!("{text}\n"),
+            lo,
+            ln,
+            tag,
+        });
+        match tag {
+            ChangeTag::Insert => ln = ln.saturating_add(1),
+            ChangeTag::Delete => lo = lo.saturating_add(1),
+            ChangeTag::Equal => {
+                lo = lo.saturating_add(1);
+                ln = ln.saturating_add(1);
+            }
+        }
+    }
+    if !current.is_empty() {
+        hunks.push(current);
+    }
+    hunks
+}
+
+/// Read `@@ -a,b +c,d @@` and return the 1-based `(old_start, new_start)`.
+///
+/// The counts are not needed for rendering, and unified diffs may omit them
+/// (`@@ -5 +5 @@` means a single line), so only the starts are returned.
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, new_part) = rest.split_once(" +")?;
+    let old_start = old_part
+        .split(',')
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())?;
+    let new_start = new_part
+        .split(',')
+        .next()
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<usize>().ok())?;
+    Some((old_start, new_start))
+}
+
 /// Builds diff hunks from before/after text alone, with no structured `SearchReplaceEditDetail`.
 /// The ACP `ToolCallContent::Diff` fallback uses this for pre-execution previews and for backends that send whole files.
 /// Changes more than twice `MAX_CONTEXT` unchanged lines apart go into separate hunks, so a whole-file diff never shows the unchanged middle.
@@ -434,6 +525,87 @@ pub fn diff_hunks_to_patch(path: &str, hunks: &[DiffHunk]) -> String {
 mod tests {
     use super::*;
     use similar::ChangeTag;
+
+    #[test]
+    fn patch_round_trips_through_hunks() {
+        let patch = "--- a/src/lib.rs\n\
+                     +++ b/src/lib.rs\n\
+                     @@ -1,3 +1,3 @@\n\
+                     \x20let a = 1;\n\
+                     -let b = 2;\n\
+                     +let b = 3;\n\
+                     \x20let c = 4;\n";
+        let hunks = diff_hunks_from_patch(patch);
+        assert_eq!(hunks.len(), 1);
+        let hunk = &hunks[0];
+        assert_eq!(hunk.len(), 4);
+        assert_eq!(hunk[0].tag, ChangeTag::Equal);
+        assert_eq!(hunk[0].text, "let a = 1;\n");
+        assert_eq!((hunk[0].lo, hunk[0].ln), (1, 1));
+        assert_eq!(hunk[1].tag, ChangeTag::Delete);
+        assert_eq!((hunk[1].lo, hunk[1].ln), (2, 2));
+        assert_eq!(hunk[2].tag, ChangeTag::Insert);
+        assert_eq!(hunk[2].text, "let b = 3;\n");
+        // The delete consumed an old line, the insert did not, so the trailing
+        // context sits on old line 3 / new line 3.
+        assert_eq!((hunk[3].lo, hunk[3].ln), (3, 3));
+        assert_eq!(hunk[3].tag, ChangeTag::Equal);
+    }
+
+    #[test]
+    fn patch_parsing_handles_empty_and_header_only_input() {
+        assert!(diff_hunks_from_patch("").is_empty());
+        assert!(diff_hunks_from_patch("--- a/x\n+++ b/x\n").is_empty());
+        // Only a header, no body.
+        assert!(diff_hunks_from_patch("@@ -1,2 +1,2 @@\n").is_empty());
+    }
+
+    #[test]
+    fn patch_parsing_accepts_crlf_and_skips_the_no_newline_marker() {
+        let patch = "--- a/x\r\n+++ b/x\r\n@@ -1,2 +1,2 @@\r\n-old\r\n+new\r\n\\ No newline at end of file\r\n";
+        let hunks = diff_hunks_from_patch(patch);
+        assert_eq!(hunks.len(), 1);
+        let hunk = &hunks[0];
+        // The marker must not become a content line.
+        assert_eq!(hunk.len(), 2);
+        assert_eq!(hunk[0].tag, ChangeTag::Delete);
+        assert_eq!(hunk[0].text, "old\n");
+        assert_eq!(hunk[1].tag, ChangeTag::Insert);
+        assert_eq!(hunk[1].text, "new\n");
+    }
+
+    #[test]
+    fn multiple_hunks_keep_their_own_line_numbers() {
+        let patch = "@@ -1,1 +1,1 @@\n-a\n+b\n@@ -20,1 +20,1 @@\n-c\n+d\n";
+        let hunks = diff_hunks_from_patch(patch);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!((hunks[0][0].lo, hunks[0][0].ln), (1, 1));
+        assert_eq!((hunks[1][0].lo, hunks[1][0].ln), (20, 20));
+    }
+
+    /// A patch written by this crate must read back to the same tags and text.
+    #[test]
+    fn this_crates_patch_output_parses_back() {
+        let old = "one\ntwo\nthree\n";
+        let new = "one\nTWO\nthree\n";
+        let hunks = diff_hunks_from_strings(old, new, 1);
+        let patch = diff_hunks_to_patch("f.txt", &hunks);
+        let parsed = diff_hunks_from_patch(&patch);
+        let flat: Vec<(ChangeTag, String)> = parsed
+            .iter()
+            .flatten()
+            .map(|line| (line.tag, line.text.clone()))
+            .collect();
+        assert!(
+            flat.iter().any(|(tag, text)| *tag == ChangeTag::Insert && text == "TWO\n"),
+            "inserted line survives the round trip: {flat:?}"
+        );
+        assert!(
+            flat.iter()
+                .any(|(tag, text)| *tag == ChangeTag::Delete && text == "two\n"),
+            "deleted line survives the round trip: {flat:?}"
+        );
+    }
 
     fn only_hunk(hunks: &[DiffHunk]) -> &DiffHunk {
         let Some(hunk) = hunks.first() else {

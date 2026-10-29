@@ -2443,6 +2443,7 @@ pub(crate) mod test_fixtures {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         };
         session.enqueue_prompt("local one".to_string());
@@ -2509,6 +2510,7 @@ pub(crate) mod test_fixtures {
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                displayed_diffs: std::collections::HashSet::new(),
                 backend_mode_label: None,
             },
             ScrollbackState::new(),
@@ -3345,6 +3347,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         },
         crate::scrollback::state::ScrollbackState::new(),

@@ -357,6 +357,11 @@ pub enum Action {
     /// `Some(0)` restores the even split, `Some(1..=99)` sets a fixed ratio,
     /// `None` only reports the current layout.
     PaneSplit { percent: Option<u16> },
+    /// `/diff`: pull this session's unified diff over HTTP and render it.
+    ///
+    /// `session.diff` is not an event on the feed, so this is a pull, not a
+    /// subscription. `context` is the number of unchanged lines around a hunk.
+    ShowSessionDiff { context: u32 },
     /// `/pane list`: report the open panes and their profiles.
     PaneList,
     /// Copy selected block's content to clipboard.
@@ -2990,6 +2995,19 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         error: String,
         nonce: u64,
+    },
+    /// `/diff` finished: one entry per changed file, already parsed from the
+    /// kernel's `FileDiff.Info` list.
+    SessionDiffComplete {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        files: Vec<crate::app::diff_view::SessionDiffFile>,
+    },
+    /// `/diff` could not reach the kernel, or the endpoint answered with an error.
+    SessionDiffFailed {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        error: String,
     },
     /// Feedback submitted successfully (fire-and-forget).
     /// A modal-origin completion only takes the consent parked for its exact submission; anything else is stale and a no-op.

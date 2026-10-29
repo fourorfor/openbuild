@@ -378,6 +378,7 @@ pub(crate) fn test_app_with_agent() -> AppView {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         },
         ScrollbackState::new(),
@@ -586,6 +587,7 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        displayed_diffs: std::collections::HashSet::new(),
         backend_mode_label: None,
     };
     Box::new(AgentView::new(session, ScrollbackState::new()))

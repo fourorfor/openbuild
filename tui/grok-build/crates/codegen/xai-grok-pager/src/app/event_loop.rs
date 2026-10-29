@@ -2668,6 +2668,65 @@ pub(crate) async fn run(
             close_pane(&mut app, connection);
             presenter.request(false);
         }
+        if let Some(request) = app.diff_request.take() {
+            // A pull, issued here because only the loop can reach the
+            // connection's feed handle. `spawn` keeps the HTTP round trip off
+            // the `select!` path.
+            let client = app
+                .connections
+                .get(&app.connection_of(request.agent_id))
+                .and_then(|handle| handle.http_feed.as_ref())
+                .map(|feed| feed.client_handle());
+            match client {
+                Some(client) => {
+                    let agent_id = request.agent_id;
+                    let session_id = request.session_id;
+                    let context = request.context;
+                    tasks.spawn(async move {
+                        let raw = client
+                            .session_diff(&session_id.0, context)
+                            .await
+                            .map(|files| {
+                                files.into_iter().map(|file| {
+                                    crate::app::diff_view::SessionDiffFile {
+                                        path: file.display_path(),
+                                        patch: file.patch,
+                                        additions: file.additions,
+                                        deletions: file.deletions,
+                                        status: file.status,
+                                    }
+                                }).collect::<Vec<_>>()
+                            });
+                        match raw {
+                            Ok(files) => TaskResult::SessionDiffComplete {
+                                agent_id,
+                                session_id,
+                                files,
+                            },
+                            Err(error) => TaskResult::SessionDiffFailed {
+                                agent_id,
+                                session_id,
+                                error: error.to_string(),
+                            },
+                        }
+                    });
+                }
+                None => {
+                    // No side channel for this pane: degrade with a readable
+                    // line instead of a silent no-op.
+                    if let Some(agent) = app.agents.get_mut(&request.agent_id) {
+                        agent.scrollback.push_block(
+                            crate::scrollback::block::RenderBlock::system(
+                                "Session diff needs the HTTP side channel, which this pane does not have \
+                                 (it may be disabled by OPENBUILD_HTTP_FEED=0)."
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    presenter.request(false);
+                }
+            }
+        }
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
             if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline() {
                 let stt_routes = crate::voice::build_stt_routes(voice_auth_factory.clone());

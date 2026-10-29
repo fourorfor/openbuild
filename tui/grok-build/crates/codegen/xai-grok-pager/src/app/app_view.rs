@@ -1044,6 +1044,12 @@ pub struct AppView {
     pub pane_open_request: Option<connections::ProfileSpec>,
     /// A `/pane close` waiting to stop its kernel (the loop owns the cancel token).
     pub pane_close_request: Option<connections::ConnectionId>,
+    /// A `/diff` waiting for the event loop to issue its HTTP request.
+    ///
+    /// The request is a pull, not an event, and only the loop can reach the
+    /// connection's [`openbuild_backend::http_feed::FeedClient`]; dispatch just
+    /// records the intent.
+    pub diff_request: Option<crate::app::diff_view::DiffRequest>,
     /// Screen rectangle the last frame painted panes into.
     ///
     /// Click-to-focus must use the geometry the user actually saw, not a fresh
@@ -1683,6 +1689,7 @@ impl AppView {
             reconnect_pending: false,
             pane_open_request: None,
             pane_close_request: None,
+            diff_request: None,
             last_pane_area: None,
             pane_notice: None,
             startup_warnings: Vec::new(),

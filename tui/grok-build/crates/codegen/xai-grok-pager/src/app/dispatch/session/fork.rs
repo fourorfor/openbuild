@@ -286,6 +286,7 @@ fn build_fork_placeholder(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            displayed_diffs: std::collections::HashSet::new(),
             backend_mode_label: None,
         },
         scrollback,

@@ -41,6 +41,7 @@ pub mod mcps;
 pub mod memory;
 pub mod memory_ops;
 pub mod model;
+pub mod diff;
 pub mod pane;
 pub use pane::{pane_layout_line, pane_report};
 pub mod multiline;
@@ -98,6 +99,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(context::ContextCommand),
         Arc::new(backend::BackendCommand),
         Arc::new(pane::PaneCommand),
+        Arc::new(diff::DiffCommand),
         Arc::new(reconnect::ReconnectCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(fork::ForkCommand),
