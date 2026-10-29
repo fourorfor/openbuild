@@ -795,18 +795,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             let changed = match target.as_deref() {
                 None | Some("next") => app.pane_layout.cycle_focus(),
-                Some("left") => app
-                    .pane_layout
-                    .panes
-                    .first()
-                    .copied()
-                    .is_some_and(|id| app.pane_layout.focus(id)),
-                Some("right") => app
-                    .pane_layout
-                    .panes
-                    .get(1)
-                    .copied()
-                    .is_some_and(|id| app.pane_layout.focus(id)),
+                // `left` / `right` walk the row. With two panes this is exactly
+                // the old first/second behaviour; with three or four it moves
+                // one column instead of jumping to a hard-coded index.
+                Some("left") => app.pane_layout.focus_step(-1),
+                Some("right") => app.pane_layout.focus_step(1),
                 _ => false,
             };
             if changed && let Some(id) = app.pane_layout.focused_agent() {
@@ -828,7 +821,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             }
             if let Some(percent) = percent {
-                app.pane_layout.split_percent = percent;
+                app.pane_layout.set_split_percent(percent);
             }
             push_pane_notice(
                 app,

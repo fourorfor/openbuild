@@ -195,17 +195,33 @@ pub fn pane_layout_line(layout: &PaneLayout, width: u16) -> String {
     if !layout.is_split() {
         return "Layout: single pane. /pane open starts a second kernel.".to_string();
     }
-    let (left, right) = PaneLayout::split_widths_with(width, layout.split_percent);
-    let total = u32::from(left) + u32::from(right);
-    let left_percent = if total == 0 {
-        50
-    } else {
-        (u32::from(left) * 100 + total / 2) / total
-    };
+    let percents = layout.percents();
+    let widths = layout.widths(width);
+    let ratio = percents
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join("/");
+    if percents.len() == 2 {
+        return format!(
+            "Layout: two panes side by side ({ratio} at {width} columns wide → {}). \
+             /pane split <pct> sets the right column, /pane split 0 restores even.",
+            widths
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join("+")
+        );
+    }
     format!(
-        "Layout: two panes side by side ({left_percent}/{right_percent} at {width} columns wide \
-         → {left}+{right}). /pane split <pct> sets the right column, /pane split 0 restores even.",
-        right_percent = 100 - left_percent,
+        "Layout: {} panes side by side ({ratio} at {width} columns wide → {}). \
+         /pane split <pct> sets the right column, /pane split 0 restores even.",
+        percents.len(),
+        widths
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join("+")
     )
 }
 
@@ -404,11 +420,16 @@ mod tests {
         assert!(even.contains("50/50"), "{even}");
         assert!(even.contains("50+50"), "{even}");
 
-        layout.split_percent = 30;
+        layout.set_split_percent(30);
         let narrow = pane_layout_line(&layout, 100);
         assert!(narrow.contains("70/30"), "{narrow}");
         assert!(narrow.contains("70+30"), "{narrow}");
 
+        // Three panes report every column, not just the old left/right pair.
+        layout.open(crate::app::agent::AgentId(3));
+        let three = pane_layout_line(&layout, 120);
+        assert!(three.contains("3 panes"), "{three}");
+        assert!(three.contains("120"), "{three}");
         // A single pane reports that there is nothing to split.
         let mut single = PaneLayout::default();
         single.open(crate::app::agent::AgentId(1));

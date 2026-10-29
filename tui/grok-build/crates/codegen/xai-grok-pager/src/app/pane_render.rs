@@ -59,7 +59,7 @@ pub(crate) fn render_split_panes(params: SplitPaneParams<'_>) -> Option<Option<(
         privacy_banner,
         mouse_pos,
     } = params;
-    if !layout.is_split() || area.width < 20 {
+    if !layout.is_split() {
         return None;
     }
     let panes: Vec<AgentId> = layout
@@ -71,25 +71,18 @@ pub(crate) fn render_split_panes(params: SplitPaneParams<'_>) -> Option<Option<(
     if panes.len() < 2 {
         return None;
     }
-
-    let (left_width, right_width) = PaneLayout::split_widths_with(area.width, layout.split_percent);
-    let rects = [
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: left_width,
-            height: area.height,
-        },
-        Rect {
-            x: area.x + left_width,
-            y: area.y,
-            width: right_width,
-            height: area.height,
-        },
-    ];
+    // A narrow row cannot carry one usable column per pane; fall back to the
+    // single-view renderer rather than painting unreadable slivers.
+    if area.width < min_split_width(panes.len()) {
+        return None;
+    }
+    let rects = split_rects(layout, area, panes.len());
+    if rects.len() != panes.len() {
+        return None;
+    }
 
     let mut cursor = None;
-    for (index, id) in panes.iter().enumerate().take(2) {
+    for (index, id) in panes.iter().enumerate() {
         let rect = rects[index];
         let focused = index == layout.focused;
         let Some(agent) = agents.get_mut(id) else {
@@ -132,13 +125,16 @@ pub(crate) fn render_split_panes(params: SplitPaneParams<'_>) -> Option<Option<(
         }
         draw_pane_frame(buf, rect, index + 1, focused);
     }
-    // The divider column belongs to no pane; paint it so the split reads as one
-    // surface instead of two transcripts sharing a background.
+    // Each divider column belongs to no pane; paint them so the split reads as
+    // one surface instead of several transcripts sharing a background.
     let theme = crate::theme::Theme::current();
-    for y in rects[0].y..rects[0].y + rects[0].height {
-        if let Some(cell) = buf.cell_mut((rects[1].x.saturating_sub(1), y)) {
-            cell.set_symbol("│");
-            cell.set_style(ratatui::style::Style::default().fg(theme.text_secondary));
+    for rect in rects.iter().skip(1) {
+        let x = rect.x.saturating_sub(1);
+        for y in area.y..area.y + area.height {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol("│");
+                cell.set_style(ratatui::style::Style::default().fg(theme.text_secondary));
+            }
         }
     }
     let _ = privacy_banner;
@@ -185,15 +181,49 @@ fn draw_pane_frame(
 
 /// Which pane contains a terminal coordinate, if any.
 pub(crate) fn pane_at(layout: &PaneLayout, area: Rect, column: u16, row: u16) -> Option<AgentId> {
-    if !layout.is_split() || area.width < 20 {
+    if !layout.is_split() {
         return None;
     }
     if row < area.y || row >= area.y + area.height {
         return None;
     }
-    let (left_width, _) = PaneLayout::split_widths_with(area.width, layout.split_percent);
-    let index = if column < area.x + left_width { 0 } else { 1 };
-    layout.panes.get(index).copied()
+    let panes: Vec<AgentId> = layout.panes.clone();
+    if area.width < min_split_width(panes.len()) {
+        return None;
+    }
+    let rects = split_rects(layout, area, panes.len());
+    // Hit-testing walks the same rectangles the renderer paints, so the divider
+    // column and the last column can never disagree between the two.
+    let index = rects
+        .iter()
+        .position(|rect| column >= rect.x && column < rect.x + rect.width)?;
+    panes.get(index).copied()
+}
+
+/// Minimum row width that can carry `pane_count` usable columns.
+///
+/// Two panes need 20 columns (the historical floor, which keeps the old split
+/// behaviour identical); every extra pane adds another 20 so three panes do not
+/// get 6-column slivers on a 60-column terminal.
+pub(crate) fn min_split_width(pane_count: usize) -> u16 {
+    (pane_count.max(2) as u16).saturating_mul(20)
+}
+
+/// One rectangle per visible pane, built by prefix sum over [`PaneLayout::widths`].
+pub(crate) fn split_rects(layout: &PaneLayout, area: Rect, pane_count: usize) -> Vec<Rect> {
+    let widths = layout.widths(area.width);
+    let mut rects = Vec::with_capacity(pane_count);
+    let mut x = area.x;
+    for width in widths.iter().take(pane_count) {
+        rects.push(Rect {
+            x,
+            y: area.y,
+            width: *width,
+            height: area.height,
+        });
+        x = x.saturating_add(*width);
+    }
+    rects
 }
 
 #[cfg(test)]
@@ -246,9 +276,77 @@ mod tests {
     #[test]
     fn an_explicit_ratio_moves_the_divider_for_hits() {
         let mut layout = layout();
-        layout.split_percent = 30;
+        layout.set_split_percent(30);
         let area = Rect::new(0, 0, 100, 24);
         assert_eq!(pane_at(&layout, area, 69, 5), Some(AgentId(1)));
         assert_eq!(pane_at(&layout, area, 71, 5), Some(AgentId(2)));
+    }
+
+    fn three_panes() -> PaneLayout {
+        let mut layout = PaneLayout::default();
+        layout.open(AgentId(1));
+        layout.open(AgentId(2));
+        layout.open(AgentId(3));
+        layout
+    }
+
+    #[test]
+    fn three_panes_resolve_to_their_own_columns() {
+        let layout = three_panes();
+        let area = Rect::new(0, 0, 120, 24);
+        // Three equal columns over 120 -> 40/40/40.
+        assert_eq!(pane_at(&layout, area, 0, 5), Some(AgentId(1)));
+        assert_eq!(pane_at(&layout, area, 39, 5), Some(AgentId(1)));
+        assert_eq!(pane_at(&layout, area, 40, 5), Some(AgentId(2)));
+        assert_eq!(pane_at(&layout, area, 79, 5), Some(AgentId(2)));
+        assert_eq!(pane_at(&layout, area, 80, 5), Some(AgentId(3)));
+        assert_eq!(pane_at(&layout, area, 119, 5), Some(AgentId(3)));
+        // Past the row belongs to no pane.
+        assert_eq!(pane_at(&layout, area, 120, 5), None);
+    }
+
+    #[test]
+    fn three_panes_render_contiguous_rectangles() {
+        let layout = three_panes();
+        let area = Rect::new(2, 1, 121, 24);
+        let rects = split_rects(&layout, area, 3);
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].x, 2);
+        for pair in rects.windows(2) {
+            assert_eq!(
+                pair[0].x + pair[0].width,
+                pair[1].x,
+                "rectangles must be adjacent, not overlapping"
+            );
+        }
+        let last = &rects[2];
+        assert_eq!(
+            last.x + last.width,
+            area.x + area.width,
+            "the last pane must end at the row's right edge"
+        );
+        assert!(rects.iter().all(|rect| rect.width >= 1));
+    }
+
+    #[test]
+    fn a_three_pane_row_needs_a_wider_terminal() {
+        let layout = three_panes();
+        // 60 columns used to be enough for two panes; three would be 20/20/20,
+        // which is exactly the floor, so 59 is the first refused width.
+        assert_eq!(min_split_width(3), 60);
+        assert_eq!(pane_at(&layout, Rect::new(0, 0, 59, 24), 5, 5), None);
+        assert!(pane_at(&layout, Rect::new(0, 0, 60, 24), 5, 5).is_some());
+    }
+
+    #[test]
+    fn closing_a_middle_pane_recomputes_the_row() {
+        let mut layout = three_panes();
+        assert!(layout.close(AgentId(2)));
+        let area = Rect::new(0, 0, 100, 24);
+        let rects = split_rects(&layout, area, 2);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+        assert_eq!(pane_at(&layout, area, 70, 5), Some(AgentId(3)));
     }
 }

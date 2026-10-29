@@ -128,8 +128,15 @@ pub struct PaneLayout {
     pub panes: Vec<AgentId>,
     /// Index into `panes` that receives input.
     pub focused: usize,
-    /// Right pane's percentage of the width (0 means an even split).
-    pub split_percent: u16,
+    /// Per-pane width weights, one entry per pane.
+    ///
+    /// Empty means "every pane gets the same width". A weight is a share of the
+    /// whole row rather than a pixel count, so the layout survives a resize;
+    /// [`Self::percents`] normalises whatever is stored into parts of 100 and
+    /// [`Self::widths`] is the only place that turns it into columns. Rendering
+    /// and hit-testing both call `widths`, which is what keeps them in sync
+    /// across two or more panes.
+    pub split_weights: Vec<u16>,
 }
 
 impl Default for PaneLayout {
@@ -137,7 +144,7 @@ impl Default for PaneLayout {
         Self {
             panes: Vec::new(),
             focused: 0,
-            split_percent: 0,
+            split_weights: Vec::new(),
         }
     }
 }
@@ -148,7 +155,7 @@ impl PaneLayout {
         self.panes.len() <= 1
     }
 
-    /// Whether two panes are visible.
+    /// Whether two or more panes are visible.
     pub fn is_split(&self) -> bool {
         self.panes.len() >= 2
     }
@@ -178,15 +185,39 @@ impl PaneLayout {
         true
     }
 
-    /// Add a pane to the right. At most two panes are shown (the split is a
-    /// strict side-by-side comparison, not a tiling window manager).
+    /// Move focus one pane to the left (`-1`) or right (`+1`), clamped.
+    ///
+    /// With two panes this is exactly the old left/right pair; with more it
+    /// walks the row instead of jumping to a hard-coded index.
+    pub fn focus_step(&mut self, delta: isize) -> bool {
+        if self.panes.len() < 2 {
+            return false;
+        }
+        let last = self.panes.len() - 1;
+        let next = (self.focused as isize + delta).clamp(0, last as isize) as usize;
+        if next == self.focused {
+            return false;
+        }
+        self.focused = next;
+        true
+    }
+
+    /// Add a pane to the right.
+    ///
+    /// The cap is the connection registry's slot count, not a fixed two: each
+    /// pane owns a kernel, and `MAX_CONNECTIONS` is what the backend can hold.
     pub fn open(&mut self, id: AgentId) -> bool {
-        if self.panes.contains(&id) || self.panes.len() >= 2 {
+        if self.panes.contains(&id)
+            || self.panes.len() >= openbuild_backend::profile::MAX_CONNECTIONS
+        {
             return false;
         }
         self.panes.push(id);
-        if self.panes.len() == 2 {
-            self.focused = 1;
+        // A new pane changes the row, so a stale per-pane ratio would be applied
+        // to the wrong pane. Reset to the documented even split instead.
+        self.split_weights.clear();
+        if self.panes.len() > 1 {
+            self.focused = self.panes.len() - 1;
         }
         true
     }
@@ -197,6 +228,9 @@ impl PaneLayout {
             return false;
         };
         self.panes.remove(index);
+        if index < self.split_weights.len() {
+            self.split_weights.remove(index);
+        }
         if self.focused >= self.panes.len() {
             self.focused = self.panes.len().saturating_sub(1);
         }
@@ -206,7 +240,16 @@ impl PaneLayout {
     /// Drop panes that no longer exist (session closed) and repair focus.
     pub fn retain_existing(&mut self, agents: &indexmap::IndexMap<AgentId, AgentView>) -> bool {
         let before = (self.panes.clone(), self.focused);
-        self.panes.retain(|id| agents.contains_key(id));
+        let mut index = 0;
+        self.panes.retain(|id| {
+            let keep = agents.contains_key(id);
+            if !keep && index < self.split_weights.len() {
+                self.split_weights.remove(index);
+            } else {
+                index += 1;
+            }
+            keep
+        });
         if self.focused >= self.panes.len() {
             self.focused = self.panes.len().saturating_sub(1);
         }
@@ -233,6 +276,107 @@ impl PaneLayout {
         };
         let right = right.clamp(1, width - 1);
         (width - right, right)
+    }
+
+    /// Percent of the row each pane occupies, normalised to parts of 100.
+    ///
+    /// The vector always has one entry per visible pane; a single pane owns the
+    /// whole row. Missing or zero weights fall back to an even split, so a
+    /// stale vector can never produce a zero-width pane.
+    pub fn percents(&self) -> Vec<u16> {
+        let count = self.panes.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        if count == 1 {
+            return vec![100];
+        }
+        let weights: Vec<u32> = (0..count)
+            .map(|index| u32::from(self.split_weights.get(index).copied().unwrap_or(0)).max(1))
+            .collect();
+        let total: u32 = weights.iter().sum();
+        let mut out = Vec::with_capacity(count);
+        let mut used = 0u32;
+        for (index, weight) in weights.iter().enumerate() {
+            let percent = if index + 1 == count {
+                // The last pane absorbs the rounding remainder so the parts
+                // always add up to exactly 100.
+                100u32.saturating_sub(used)
+            } else {
+                ((weight * 100 + total / 2) / total).clamp(1, 99)
+            };
+            used += percent;
+            out.push(percent as u16);
+        }
+        out
+    }
+
+    /// Column count per pane for a row `width` columns wide.
+    ///
+    /// Every pane keeps at least one column and the last one takes the rounding
+    /// remainder, so `sum(widths) == width` and rendering can build rectangles by
+    /// prefix sum without a gap or an off-by-one divider.
+    pub fn widths(&self, width: u16) -> Vec<u16> {
+        let count = self.panes.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        if count == 1 || width == 0 {
+            return vec![width];
+        }
+        let percents = self.percents();
+        let mut out = Vec::with_capacity(count);
+        let mut used = 0u16;
+        for (index, percent) in percents.iter().enumerate() {
+            let columns = if index + 1 == count {
+                width.saturating_sub(used).max(1)
+            } else {
+                ((u32::from(width) * u32::from(*percent) + 50) / 100) as u16
+            };
+            let columns = columns.max(1);
+            used = used.saturating_add(columns);
+            out.push(columns);
+        }
+        out
+    }
+
+    /// Set the rightmost pane's share of the row.
+    ///
+    /// This keeps the pre-N semantics of `split_percent`: "the right pane is
+    /// `percent` wide". With two panes `30` means `[70, 30]`; with more, the
+    /// rightmost pane takes `percent` and the others share the remainder
+    /// evenly, so the command stays meaningful without a per-boundary syntax.
+    /// `0` (or anything out of range) restores the even split.
+    pub fn set_split_percent(&mut self, percent: u16) {
+        let count = self.panes.len();
+        if count < 2 {
+            return;
+        }
+        if !(1..=99).contains(&percent) {
+            self.split_weights.clear();
+            return;
+        }
+        let others = (count - 1) as u16;
+        let remainder = 100u16.saturating_sub(percent);
+        self.split_weights = (0..count)
+            .map(|index| {
+                if index + 1 == count {
+                    percent
+                } else {
+                    (remainder / others).max(1)
+                }
+            })
+            .collect();
+    }
+
+    /// The ratio the user last asked for: the rightmost pane's percent.
+    ///
+    /// A fresh layout answers 0, the documented "even split" value.
+    pub fn split_percent(&self) -> u16 {
+        if self.split_weights.is_empty() || self.panes.len() < 2 {
+            return 0;
+        }
+        self.percents().last().copied().unwrap_or(0)
     }
 }
 
@@ -263,12 +407,19 @@ mod tests {
     }
 
     #[test]
-    fn a_third_pane_is_refused() {
+    fn a_third_pane_is_allowed_until_the_slot_cap() {
         let mut layout = PaneLayout::default();
-        layout.open(agent(1));
-        layout.open(agent(2));
-        assert!(!layout.open(agent(3)));
-        assert_eq!(layout.panes.len(), 2);
+        for slot in 1..=openbuild_backend::profile::MAX_CONNECTIONS {
+            assert!(layout.open(agent(slot)), "slot {slot} must open");
+        }
+        assert_eq!(
+            layout.panes.len(),
+            openbuild_backend::profile::MAX_CONNECTIONS
+        );
+        assert!(
+            !layout.open(agent(99)),
+            "a pane beyond the connection cap must be refused"
+        );
     }
 
     #[test]
@@ -279,6 +430,21 @@ mod tests {
         assert!(layout.close(agent(2)));
         assert_eq!(layout.focused, 0);
         assert_eq!(layout.focused_agent(), Some(agent(1)));
+    }
+
+    #[test]
+    fn closing_a_middle_pane_keeps_the_rest_and_repairs_focus() {
+        let mut layout = PaneLayout::default();
+        layout.open(agent(1));
+        layout.open(agent(2));
+        layout.open(agent(3));
+        layout.focus(agent(2));
+        assert!(layout.close(agent(2)));
+        assert_eq!(layout.panes, vec![agent(1), agent(3)]);
+        assert!(layout.focused < layout.panes.len());
+        // The remaining row is split into exactly the terminal width.
+        let widths = layout.widths(120);
+        assert_eq!(widths.iter().map(|w| u32::from(*w)).sum::<u32>(), 120);
     }
 
     #[test]
@@ -316,6 +482,69 @@ mod tests {
         // Out-of-range ratios fall back to an even split.
         assert_eq!(PaneLayout::split_widths_with(100, 0), (50, 50));
         assert_eq!(PaneLayout::split_widths_with(100, 100), (50, 50));
+    }
+
+    /// `/pane split 30` must survive the trip through the vector geometry: the
+    /// row is still 70/30 and a click at column 71 is the right pane.
+    #[test]
+    fn an_explicit_percent_round_trips_through_widths() {
+        let mut layout = PaneLayout::default();
+        layout.open(agent(1));
+        layout.open(agent(2));
+        layout.set_split_percent(30);
+        assert_eq!(layout.split_percent(), 30);
+        assert_eq!(layout.percents(), vec![70, 30]);
+        assert_eq!(layout.widths(100), vec![70, 30]);
+        // 0 restores the even split.
+        layout.set_split_percent(0);
+        assert_eq!(layout.split_percent(), 0);
+        assert_eq!(layout.widths(100), vec![50, 50]);
+    }
+
+    #[test]
+    fn widths_fill_the_row_exactly_for_every_pane_count() {
+        for count in 2..=openbuild_backend::profile::MAX_CONNECTIONS {
+            let mut layout = PaneLayout::default();
+            for slot in 1..=count {
+                layout.open(agent(slot));
+            }
+            for width in [24u16, 61, 80, 120, 200] {
+                let widths = layout.widths(width);
+                assert_eq!(widths.len(), count, "one width per pane at {count} panes");
+                assert_eq!(
+                    widths.iter().map(|w| u32::from(*w)).sum::<u32>(),
+                    u32::from(width),
+                    "widths must add up to the row at {count} panes / {width} columns"
+                );
+                assert!(
+                    widths.iter().all(|w| *w >= 1),
+                    "every pane keeps at least one column: {widths:?}"
+                );
+                let percents = layout.percents();
+                assert_eq!(percents.len(), count);
+                assert_eq!(
+                    percents.iter().map(|p| u32::from(*p)).sum::<u32>(),
+                    100,
+                    "percents always add up to 100: {percents:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn focus_steps_walk_the_row_and_clamp() {
+        let mut layout = PaneLayout::default();
+        layout.open(agent(1));
+        layout.open(agent(2));
+        layout.open(agent(3));
+        assert_eq!(layout.focused, 2);
+        assert!(layout.focus_step(-1));
+        assert_eq!(layout.focused, 1);
+        assert!(layout.focus_step(-1));
+        assert_eq!(layout.focused, 0);
+        assert!(!layout.focus_step(-1), "already at the left edge");
+        assert!(layout.focus_step(1));
+        assert_eq!(layout.focused, 1);
     }
 
     #[test]
