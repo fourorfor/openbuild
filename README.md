@@ -12,7 +12,7 @@ openbuild-kernel.exe (Bun)
 OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 
-本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连；**E2 双内核并排（`/pane`）已落地**；H 无审查模式 v1.1 已落地。
+OpenBuild 是一套独立的 agent 产品：内核（Bun，源自 opencode）与终端界面（Rust，源自 grok-build）都直接在本仓库内维护，不需要再打补丁。**M0–M5**（骨架、主链路、权限、会话/模型、压缩可见性、诊断）以及主题导入、`/kernel`、子智能体接管、ACP 服务端、HTTP 直连、**E2 双内核并排（`/pane`）**、H 无审查模式 v1.1 均已落地。
 
 ## 当前状态
 
@@ -71,18 +71,17 @@ OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 openbuild/
 ├── README.md
+├── LICENSE                # 本仓库自有代码（MIT）
+├── THIRD-PARTY-NOTICES.md  # 上游来源与授权声明
 ├── build.ps1              # 构建内核 + TUI + ACP 服务端，产出 dist/
 ├── run.ps1                # 启动 TUI（自动指向 dist 内核）
 ├── verify.ps1             # 后端单测 + 真实 ACP 握手
+├── install.ps1            # 安装到 %LOCALAPPDATA%\OpenBuild
 ├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
-├── patches/               # 两个上游仓库的完整改动（22 个补丁，可复现）
 ├── tests/                 # H 无审查插件的 Bun 单测
-├── vendor/opencode/       # 内核源码 @ b2526211ec
+├── vendor/opencode/       # 内核源码 @ b2526211ec（含 openbuild 改动）
 └── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
 ```
-
-`patches/` 里是 22 个按主题拆分的补丁（内核 9 个 + TUI 13 个），
-应用顺序与内容见 [`patches/README.md`](patches/README.md)。
 
 ## 快速开始
 
@@ -279,7 +278,7 @@ notepad "$env:USERPROFILE\.config\opencode\openbuild.jsonc"
 - **删除 provider 不会立即生效**。内核常驻背景服务是单向热加载：新增立即出现，
   删除仍会列出。要清掉旧条目跑 `openbuild-kernel service restart`。
 
-完整字段说明、各服务商配方、排错表见 [`docs/openbuild-providers.md`](../docs/openbuild-providers.md)。
+完整字段说明、各服务商配方与排错表见本节上下文的配置示例。
 
 ## 主题：导入 opencode / VSCode 配色
 
@@ -402,7 +401,7 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 - **交互式 TUI 的 PTY 级验收**：J1（杀内核 → 提示 → `/reconnect` → 恢复）
   已用仓库自带的 `ptyctl` 在真实 release 二进制上通过；上游
   `xai-grok-pager-pty-harness` 在 Windows 上仍不可用（零字节屏幕），但不再是
-  验收阻塞项。证据：`.yanagent/evidence/openbuild/manual-j1-20261028.md`。
+  验收阻塞项。
   B1/B3/C1/D2/E2 等其余人工项仍待补。
 - **Windows 上的上游测试失败**：`cargo test -p xai-grok-pager --lib` 有 104 个用例失败，
   全部与本次改动无关，按根因分为：
@@ -436,20 +435,17 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 
 未做：`--uncensored` 启动旗标、文本级拒绝启发式、viewer/reconcile 自动重试。
 OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝。
-设计见 [`docs/openbuild-uncensored-mode.md`](../docs/openbuild-uncensored-mode.md)。
+
 
 ## 路线图（未实现）
 
-以下功能已有设计但**尚未落地**，不要按已交付能力使用：
+以下功能仍是已知缺口：
 
-- **E 的后续打磨**（下一步）：分割比例入口、按 profile 固定初始模型、支持多于两个 pane。
-  E2 双内核本身已交付（`/pane`）。
-- **G 的 UI 消费**（下一步）：diff 视图与内核 token 用量面板。
-  注意 `session.diff` **不在** HTTP feed 上，必须走 `GET /api/session/:id/diff`。
 - **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v1.1 的其余项已完成。
+- **非 Windows 平台**：目前只在 Windows 上构建与验收；`build.ps1` / `install.ps1` 是 PowerShell 脚本。
+- **上游测试的 Windows 平台失败**：见上节「已知限制」，与本仓库改动无关。
 
-完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)，
-逐步实施方案见 [`docs/openbuild-handoff-e2-polish-g.md`](../docs/openbuild-handoff-e2-polish-g.md)。
+
 
 ## 许可证
 
