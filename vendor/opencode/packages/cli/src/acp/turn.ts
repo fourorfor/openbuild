@@ -48,6 +48,16 @@ type Subscription = {
   readonly settled: Map<string, Deferred.Deferred<void>>
 }
 
+/**
+ * A client asking to replace the running turn with this prompt.
+ *
+ * grok's queue-row `[Send now]` sends `_meta.sendNow: true` on a `session/prompt`
+ * while the previous turn is still running. The kernel must stop that turn
+ * first, then run this prompt as the next one, instead of refusing it as a
+ * concurrent prompt on the same session.
+ */
+const sendNowRequested = (params: PromptRequest) => (params as { _meta?: { sendNow?: unknown } })._meta?.sendNow === true
+
 type Turn = {
   readonly ctx: ACPTranslate.TurnContext
   readonly state: Ref.Ref<ACPTranslate.TurnState>
@@ -432,6 +442,11 @@ export const make = Effect.fnUntraced(function* (input: {
 
   return {
     prompt: Effect.fnUntraced(function* (params, signal) {
+      // Send now replaces the running turn. Stop it (and let its wind-down
+      // settle) before registering the new prompt, so the session never has
+      // two ACP prompts at once.
+      if (sendNowRequested(params) && FiberMap.hasUnsafe(turns, params.sessionId))
+        yield* FiberMap.remove(turns, params.sessionId)
       // Synchronous and before setup, so concurrent prompts cannot both register and an early cancel still applies.
       const turn = yield* Effect.withFiber((fiber) => {
         if (FiberMap.hasUnsafe(turns, params.sessionId)) {

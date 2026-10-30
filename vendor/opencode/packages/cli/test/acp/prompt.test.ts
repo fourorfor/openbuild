@@ -505,6 +505,56 @@ describe("acp prompt turns over the wire", () => {
     expect((await acp.prompt(acp.sessionId, "again")).stopReason).toBe("end_turn")
   })
 
+  test("send now replaces the running turn instead of failing as a concurrent prompt", async () => {
+    await using acp = await startSession({
+      ...held,
+      onPrompt: ({ sessionID, id, text }) =>
+        text === "hold"
+          ? [
+              delivered(sessionID, id),
+              textDelta(sessionID, "msg_held", "working"),
+              durableEvent("session.step.failed", { sessionID, assistantMessageID: "msg_held", error: lost }),
+              durableEvent("session.retry.scheduled", {
+                sessionID,
+                assistantMessageID: "msg_held",
+                attempt: 1,
+                at: 0,
+                error: lost,
+              }),
+            ]
+          : turn(sessionID, id),
+    })
+
+    const running = acp.prompt(acp.sessionId, "hold")
+    await admitted(acp, acp.sessionId)
+
+    const replaced = await acp.request("session/prompt", {
+      sessionId: acp.sessionId,
+      prompt: [{ type: "text", text: "send now" }],
+      _meta: { sendNow: true },
+    })
+
+    expect(replaced).toMatchObject({ stopReason: "end_turn" })
+    expect(await running).toMatchObject({ stopReason: "cancelled" })
+    expect(acp.server.interrupts).toEqual([acp.sessionId])
+    expect(acp.server.prompts.map((submission) => submission.text)).toEqual(["hold", "send now"])
+  })
+
+  test("a concurrent prompt without send now still fails", async () => {
+    await using acp = await startSession(held)
+
+    const running = acp.prompt(acp.sessionId, "hold")
+    await admitted(acp, acp.sessionId)
+
+    expect(await rpcError(acp.prompt(acp.sessionId, "second"))).toMatchObject({
+      code: -32603,
+      message: expect.stringContaining("already has an active ACP prompt"),
+    })
+
+    await acp.notify("session/cancel", { sessionId: acp.sessionId })
+    expect(await running).toMatchObject({ stopReason: "cancelled" })
+  })
+
   test.each(["session/close", "session/delete"] as const)(
     "%s settles the active turn before responding and detaches only that session",
     async (method) => {
