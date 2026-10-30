@@ -136,7 +136,7 @@ function update(compaction: Compaction, standardUpdates: boolean): SessionUpdate
 }
 
 // Core reports a defect as `compaction.failed` with a multi-line pretty-printed cause.
-function displayError(error: SessionError.Error) {
+export function displayError(error: SessionError.Error) {
   if (!error.message || (error.type === "compaction.failed" && error.message.includes("\n"))) return "Compaction failed"
   return error.message
 }

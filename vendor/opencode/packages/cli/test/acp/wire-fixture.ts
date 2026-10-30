@@ -81,7 +81,15 @@ const CreateBody = Schema.Struct({
   permissions: Schema.optional(Permissions),
   metadata: Schema.optional(Metadata),
 })
-const UpdateBody = Schema.Struct({ permissions: Schema.optional(Permissions), metadata: Schema.optional(Metadata) })
+const UpdateBody = Schema.Struct({
+  title: Schema.optional(Schema.String),
+  permissions: Schema.optional(Permissions),
+  metadata: Schema.optional(Metadata),
+})
+const RevertStageBody = Schema.Struct({
+  messageID: Schema.String,
+  files: Schema.optional(Schema.Boolean),
+})
 const ModelBody = Schema.Struct({
   model: Schema.Struct({ providerID: Schema.String, id: Schema.String, variant: Schema.optional(Schema.String) }),
 })
@@ -255,6 +263,10 @@ export function assistantMessage(id: string, input: Partial<AssistantMessage> = 
     time: { created: 1, completed: 2 },
     ...input,
   } satisfies SessionMessageInfo
+}
+
+export function userMessage(id: string, text: string) {
+  return { id, type: "user", text, time: { created: 1 } } satisfies SessionMessageInfo
 }
 
 export function tokens(value = 1): TokenUsageInfo {
@@ -526,6 +538,8 @@ export async function startWire(options: WireOptions = {}) {
     initialize,
     notify: <Method extends AgentNotificationMethod>(method: Method, params: AgentNotificationParamsByMethod[Method]) =>
       connection.agent.notify(method, params),
+    /** Sends an `x.ai/*` extension request, which ACP's method union does not name. */
+    extend: <Response, Params>(method: string, params: Params) => connection.agent.request<Response, Params>(method, params),
     newSession: (cwd = "/workspace", mcpServers: McpServer[] = []) => request("session/new", { cwd, mcpServers }),
     prompt: (sessionId: string, prompt: string | ContentBlock[], signal?: AbortSignal) =>
       request(
@@ -589,6 +603,10 @@ function startServer(options: WireOptions, changed: () => void) {
   const cancelledForms: Array<{ readonly sessionID: string; readonly formID: string; readonly message?: string }> = []
   const repliedForms: FormReply[] = []
   const mcp: Array<{ readonly name: string; readonly directory?: string; readonly config: unknown }> = []
+  // `reverts` is the audit of stage calls; the pending boundary lives separately
+  // because commit clears it, mirroring the kernel's staged-revert field.
+  const reverts: Array<{ readonly sessionID: string; readonly messageID?: string; readonly files?: boolean }> = []
+  const stagedReverts = new Map<string, string>()
   const fake = {
     requests,
     catalog,
@@ -604,6 +622,7 @@ function startServer(options: WireOptions, changed: () => void) {
     cancelledForms,
     repliedForms,
     mcp,
+    reverts,
     send(...events: ReadonlyArray<OpenCodeEvent>) {
       events.forEach((event) => {
         const seq = ++counter.events
@@ -719,6 +738,12 @@ function startServer(options: WireOptions, changed: () => void) {
       "/api/agent": { GET: catalogRoute(() => catalog.agents) },
       "/api/command": { GET: catalogRoute(() => catalog.commands) },
       "/api/plugin": { GET: catalogRoute(() => catalog.plugins) },
+      "/api/mcp": {
+        GET: catalogRoute(() => [
+          { name: "test-server", status: { status: "connected" }, title: "Test Server" },
+          { name: "broken-server", status: { status: "failed", error: "spawn ENOENT" } },
+        ]),
+      },
       "/api/session": {
         GET: route((_req, query) => {
           const sessions = [...fake.sessions.values()]
@@ -746,6 +771,7 @@ function startServer(options: WireOptions, changed: () => void) {
           if (!session) return notFound(req.params.sessionID)
           fake.sessions.set(session.id, {
             ...session,
+            ...(input.title !== undefined ? { title: input.title } : {}),
             ...(input.permissions ? { permissions: input.permissions } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
           })
@@ -754,6 +780,42 @@ function startServer(options: WireOptions, changed: () => void) {
         DELETE: route((req) =>
           fake.sessions.delete(req.params.sessionID) ? noContent() : notFound(req.params.sessionID),
         ),
+      },
+      "/api/session/:sessionID/revert/stage": {
+        POST: body(RevertStageBody, (req, input) => {
+          const session = fake.sessions.get(req.params.sessionID)
+          if (!session) return notFound(req.params.sessionID)
+          fake.reverts.push({
+            sessionID: session.id,
+            messageID: input.messageID,
+            ...(input.files !== undefined ? { files: input.files } : {}),
+          })
+          stagedReverts.set(session.id, input.messageID)
+          return Response.json({ data: { messageID: input.messageID, files: [] } })
+        }),
+      },
+      "/api/session/:sessionID/revert/commit": {
+        POST: route((req) => {
+          if (!fake.sessions.has(req.params.sessionID)) return notFound(req.params.sessionID)
+          // The kernel truncates from the boundary message onward only on commit,
+          // and drops the staged revert. Doing the same here makes the truncation
+          // observable through message.list while keeping stage itself side-effect free.
+          const boundaryID = stagedReverts.get(req.params.sessionID)
+          stagedReverts.delete(req.params.sessionID)
+          if (boundaryID) {
+            const messages = fake.messages.get(req.params.sessionID) ?? []
+            const boundary = messages.findIndex((message) => message.id === boundaryID)
+            if (boundary >= 0) fake.messages.set(req.params.sessionID, messages.slice(0, boundary))
+          }
+          return noContent()
+        }),
+      },
+      "/api/session/:sessionID/revert": {
+        DELETE: route((req) => {
+          if (!fake.sessions.has(req.params.sessionID)) return notFound(req.params.sessionID)
+          stagedReverts.delete(req.params.sessionID)
+          return noContent()
+        }),
       },
       "/api/session/:sessionID/fork": {
         POST: route((req) => {
