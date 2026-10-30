@@ -16,12 +16,11 @@ function Resolve-Tool($name, $envName, $candidates) {
     throw "$name not found. Set $envName or install it."
 }
 
-$bun = Resolve-Tool "bun" "OPENBUILD_BUN" @(
-    (Join-Path $root "..\.yanagent\tools\bun\bun-windows-x64\bun.exe")
-)
-$protoc = Resolve-Tool "protoc" "PROTOC" @(
-    (Join-Path $root "..\.yanagent\tools\protoc\bin\protoc.exe")
-)
+# Only PATH / env vars are consulted. The old `.yanagent/tools` fallbacks were
+# this machine's scratch layout; a clone has no such directory, and a hard-coded
+# absolute path would leak the build host's user name.
+$bun = Resolve-Tool "bun" "OPENBUILD_BUN" @()
+$protoc = Resolve-Tool "protoc" "PROTOC" @()
 
 $env:PROTOC = $protoc
 # The vendored copy has no .git; skip husky's prepare hook.

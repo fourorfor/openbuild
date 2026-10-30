@@ -6,15 +6,16 @@ $kernel = Join-Path $root "dist\openbuild-kernel.exe"
 
 if (-not (Test-Path $kernel)) { throw "missing $kernel; run .\build.ps1 first" }
 
-$env:PROTOC = if ($env:PROTOC) { $env:PROTOC } else { Join-Path $root "..\.yanagent\tools\protoc\bin\protoc.exe" }
+    $protoc = if ($env:PROTOC) { $env:PROTOC } else { (Get-Command protoc -ErrorAction SilentlyContinue).Source }
+    if (-not $protoc) { throw "protoc not found. Set `$env:PROTOC or install protoc." }
+    $env:PROTOC = $protoc
 
 $bun = if ($env:OPENBUILD_BUN) {
     $env:OPENBUILD_BUN
 } elseif (Get-Command bun -ErrorAction SilentlyContinue) {
     (Get-Command bun).Source
 } else {
-    $candidate = Join-Path $root "..\.yanagent\tools\bun\bun-windows-x64\bun.exe"
-    if (Test-Path $candidate) { $candidate } else { $null }
+    $null
 }
 
 Write-Host "== backend unit tests ==" -ForegroundColor Cyan
