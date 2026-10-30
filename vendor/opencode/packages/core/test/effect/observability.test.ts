@@ -49,7 +49,7 @@ describe("resource", () => {
 })
 
 test("falls back to local logging when OTLP initialization fails", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-observability-test-"))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openbuild-observability-test-"))
   await using _ = {
     async [Symbol.asyncDispose]() {
       await fs.rm(dir, { recursive: true, force: true })
@@ -85,13 +85,13 @@ test("falls back to local logging when OTLP initialization fails", async () => {
 })
 
 test("file logger appends concurrent runs with a run on every line", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-log-test-"))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openbuild-log-test-"))
   await using _ = {
     async [Symbol.asyncDispose]() {
       await fs.rm(dir, { recursive: true, force: true })
     },
   }
-  const file = path.join(dir, "opencode.log")
+  const file = path.join(dir, "openbuild.log")
   const write = (runID: string) =>
     Effect.forEach(
       Array.from({ length: 50 }, (_, index) => index),
@@ -113,13 +113,13 @@ test("file logger appends concurrent runs with a run on every line", async () =>
 })
 
 test("file logger flattens nested objects", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-log-test-"))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openbuild-log-test-"))
   await using _ = {
     async [Symbol.asyncDispose]() {
       await fs.rm(dir, { recursive: true, force: true })
     },
   }
-  const file = path.join(dir, "opencode.log")
+  const file = path.join(dir, "openbuild.log")
 
   await Effect.logInfo("request complete", {
     request: { method: "GET", timing: { duration: 42 } },
