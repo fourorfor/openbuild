@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This MIT license covers the original OpenBuild code in this repository
-(build scripts, `crates/codegen/openbuild-backend`,
-`crates/codegen/openbuild-server`, and OpenBuild-specific changes).
-
-The two vendored upstream trees keep their own licenses:
-
-- `vendor/opencode` — MIT, Copyright (c) 2025 opencode
-- `tui/grok-build` — Apache License 2.0, Copyright 2023-2026 SpaceXAI
-
-See `THIRD-PARTY-NOTICES.md` for the full attribution.
