@@ -254,24 +254,221 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
         Some(configured) => format!("Model: {model} (uncensored option: {configured})"),
         None => format!("Model: {model}"),
     };
-    let lines = [
-        format!("Uncensored mode: {}", if on { "on" } else { "off" }),
+    let remembered = config.default_on();
+    let mode_line = match (on, remembered) {
+        (true, true) => "Uncensored mode: on (remembered; new sessions)".to_string(),
+        (true, false) => "Uncensored mode: on (this session only)".to_string(),
+        (false, true) => "Uncensored mode: off (remembered default is on; /new turns it on)".to_string(),
+        (false, false) => "Uncensored mode: off".to_string(),
+    };
+    let mut lines = vec![
+        mode_line,
+        format!("Config: {} at {config_path}", config.status_line()),
         model_line,
         format!("Plugin: {}", plugin.summary()),
-        format!("Config: {} at {config_path}", config.summary()),
-        format!(
-            "Policy: openbuild-uncensored v{}",
-            openbuild_backend::plugin::UNCENSORED_PLUGIN_VERSION
-        ),
-        "Scope: this session; /new starts in build. Permissions are unchanged.".to_string(),
-        "Note: OpenBuild does not filter; the model/provider may still refuse.".to_string(),
     ];
+    lines.extend(policy_lines(&config));
+    lines.extend(provider_lines(&config));
+    lines.push(format!(
+        "Retry: {} · probe: {} · inherited by subagents: {}",
+        config.refusal_retry.as_str(),
+        config.text_refusal_probe.as_str(),
+        if config.inherit_subagents { "yes" } else { "no" }
+    ));
+    lines.push(
+        "Provider-side: relay policy blocks neutralized; keyword output filters avoided; \
+         server-side semantic moderation unaffected."
+            .to_string(),
+    );
+    lines.push("Note: OpenBuild does not filter; the model/provider may still refuse.".to_string());
     agent
         .scrollback
         .push_block(crate::scrollback::block::RenderBlock::system(
             lines.join("\n"),
         ));
     vec![]
+}
+
+/// The `Policy`/`Policy source`/`Marker` block of `/uncensored status`.
+fn policy_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<String> {
+    use openbuild_backend::plugin::PolicySource;
+    let status = openbuild_backend::plugin::policy_status(config);
+    let path = status
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<no config directory>".to_string());
+    let variant = if config.variant == "auto" {
+        "variant auto".to_string()
+    } else {
+        format!("variant {}", config.variant)
+    };
+    let mut lines = vec![format!(
+        "Policy: {path} (rev {} · {variant})",
+        config.policy_rev
+    )];
+    match status.source {
+        PolicySource::Compact => lines.push("Policy source: compact (default)".to_string()),
+        PolicySource::Full | PolicySource::Hybrid => {
+            let source = if status.source == PolicySource::Full {
+                "full"
+            } else {
+                "hybrid"
+            };
+            let sha = status
+                .full_sha256
+                .as_deref()
+                .map(|sha| sha[..sha.len().min(12)].to_string())
+                .unwrap_or_else(|| "<missing>".to_string());
+            lines.push(format!(
+                "Policy source: {source} (policy.full.md, {} bytes, sha256 {sha}, dsh-purge 1.1.85 Apache-2.0)",
+                status.full_bytes
+            ));
+            if status.full_bytes > 0 && !status.full_intact {
+                lines.push("Policy full: modified from upstream (kept; not overwritten)".to_string());
+            }
+            lines.push(format!(
+                "Marker: {}",
+                if status.strip_marker {
+                    "stripped (line 1 removed at injection; file on disk unchanged)"
+                } else {
+                    "kept (--keep-marker)"
+                }
+            ));
+        }
+    }
+    lines
+}
+
+/// The `Provider rewrite:` lines of `/uncensored status`.
+fn provider_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<String> {
+    use openbuild_backend::plugin::ProviderRewrite;
+    if config.provider_rewrite == ProviderRewrite::Off {
+        return vec!["Provider rewrite: off".to_string()];
+    }
+    let mut lines: Vec<String> = openbuild_backend::plugin::provider_rules()
+        .iter()
+        .map(|rule| format!("Provider rewrite: {} → {}", rule.provider_id, rule.note))
+        .collect();
+    for (provider, body) in &config.provider_rewrite_body {
+        let keys: Vec<&str> = body
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        lines.push(format!(
+            "Provider rewrite: {provider} → user body keys: {}",
+            keys.join(", ")
+        ));
+    }
+    if lines.is_empty() {
+        lines.push("Provider rewrite: auto (no matching provider installed)".to_string());
+    }
+    lines
+}
+
+
+/// Open the `/uncensored` option menu as a local modal.
+///
+/// A local modal is used instead of the `question` tool on purpose: the tool
+/// depends on the ACP form channel, and the menu must work even when that
+/// channel is unavailable.
+pub(super) fn open_uncensored_menu(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+    use xai_grok_tools::implementations::grok_build::ask_user_question::{
+        Question, QuestionOption,
+    };
+    let ActiveView::Agent(id) = app.active_view else {
+        app.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.question_view.is_some() {
+        app.show_toast("Finish answering the current question first");
+        return vec![];
+    }
+    let config = openbuild_backend::plugin::uncensored_config();
+    let on = agent.uncensored_mode_effective();
+    let option = |label: &str, description: String| QuestionOption {
+        label: label.to_string(),
+        description,
+        preview: None,
+        id: None,
+    };
+    let remembered = if config.default_on() {
+        "remembered on"
+    } else {
+        "not remembered"
+    };
+    let options = vec![
+        option(
+            "On for this session",
+            format!("Switch now; the default stays as it is ({remembered})"),
+        ),
+        option(
+            "On + remember (Recommended)",
+            "Switch now and start new sessions in uncensored".to_string(),
+        ),
+        option(
+            "Off for this session",
+            "Return this session to the build agent; keep the default".to_string(),
+        ),
+        option(
+            "Off + remember",
+            "Return this session to build and clear the default".to_string(),
+        ),
+        option("Edit policy…", "Open policy.md in your editor".to_string()),
+        option(
+            "Change variant…",
+            "Pick the per-provider policy variant".to_string(),
+        ),
+        option("Status", "Show mode, policy, and provider state".to_string()),
+    ];
+    let question = Question {
+        question: format!(
+            "Uncensored mode is {} ({}) — what should change?",
+            if on { "on" } else { "off" },
+            remembered
+        ),
+        id: None,
+        options,
+        multi_select: Some(false),
+    };
+    let stashed = agent.prompt.stash();
+    let state = QuestionViewState::new(
+        format!("uncensored-menu-{}", uuid::Uuid::new_v4()),
+        vec![question],
+        stashed,
+    )
+    .with_local_kind(LocalQuestionKind::UncensoredMenu)
+    .with_no_freeform();
+    agent.install_local_question(state);
+    agent.prompt.set_text("");
+    vec![]
+}
+
+/// Apply a menu answer: switch the session, then optionally persist the default.
+pub(super) fn uncensored_answered(app: &mut AppView, on: bool, remember: bool) -> Vec<Effect> {
+    if remember {
+        let scope = openbuild_backend::plugin::UncensoredScope::NewSessions;
+        match openbuild_backend::plugin::remember_uncensored(on, scope, None) {
+            Ok(_) => {
+                app.uncensored_default = on;
+                app.show_toast(if on {
+                    "Uncensored on; new sessions start uncensored"
+                } else {
+                    "Uncensored off; new sessions start in build"
+                });
+            }
+            Err(error) => app.show_toast(&format!("Could not save the uncensored default: {error}")),
+        }
+    }
+    let mut effects = set_uncensored_mode(app, on);
+    if remember {
+        effects.extend(show_uncensored_status(app));
+    }
+    effects
 }
 
 /// Format the `Plan mode` toast.

@@ -45,6 +45,9 @@ pub async fn serve(kernel: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<()> 
             "uncensored plugin install failed"
         );
     }
+    for error in &openbuild_backend::plugin::ensure_policy_files().errors {
+        tracing::warn!(%error, "uncensored policy install failed");
+    }
     let mut spec = openbuild_backend::spawn::default_spec(kernel).context(
         "openbuild kernel not found; set OPENBUILD_KERNEL or put openbuild-kernel.exe next to this executable",
     )?;

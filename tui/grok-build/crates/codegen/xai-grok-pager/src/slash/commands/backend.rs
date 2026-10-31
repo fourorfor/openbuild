@@ -44,6 +44,9 @@ pub fn report_for_slot(slot: crate::app::connections::ConnectionId) -> Option<St
         lines.push(format!("Kernel: {}", path.display()));
     }
     lines.push(format!("Capabilities: {}", describe_capabilities(&profile)));
+    if let Some(line) = describe_questions(&profile) {
+        lines.push(line);
+    }
     lines.push(format!(
         "Pane: slot {} · profile {}",
         slot.0,
@@ -109,6 +112,9 @@ pub fn report() -> String {
         lines.push(format!("Kernel: {}", path.display()));
     }
     lines.push(format!("Capabilities: {}", describe_capabilities(&profile)));
+    if let Some(line) = describe_questions(&profile) {
+        lines.push(line);
+    }
     lines.push(format!(
         "Proxy: {}",
         openbuild_backend::proxy::describe(openbuild_backend::spawn::active_proxy())
@@ -181,6 +187,9 @@ fn describe_capabilities(profile: &openbuild_backend::BackendProfile) -> String 
     if caps.form_elicitation {
         on.push("form elicitation");
     }
+    if caps.question_ext {
+        on.push("question extension");
+    }
     if caps.child_session_updates {
         on.push("child session updates");
     }
@@ -201,6 +210,29 @@ fn describe_capabilities(profile: &openbuild_backend::BackendProfile) -> String 
     } else {
         on.join(", ")
     }
+}
+
+/// State the question channel explicitly, including the degraded case.
+///
+/// `/backend` used to imply that form elicitation worked, which hid the real
+/// cause of the "user dismissed this question" failure. Say which channel the
+/// questions actually travel over.
+fn describe_questions(profile: &openbuild_backend::BackendProfile) -> Option<String> {
+    let caps = &profile.caps;
+    if caps.question_ext {
+        return Some(
+            "Questions: ask_user_question extension (forms render in this client)".to_string(),
+        );
+    }
+    if caps.form_elicitation {
+        return Some("Questions: ACP form elicitation".to_string());
+    }
+    if profile.is_opencode() {
+        return Some(
+            "Questions: unsupported (question falls back to assumptions)".to_string(),
+        );
+    }
+    None
 }
 
 #[cfg(test)]
@@ -233,5 +265,38 @@ mod tests {
             panic!("expected a message");
         };
         assert!(text.contains("Backend:"), "{text}");
+    }
+
+    fn profile_with(
+        mutate: impl FnOnce(&mut openbuild_backend::Capabilities),
+    ) -> openbuild_backend::BackendProfile {
+        let mut profile = openbuild_backend::BackendProfile::opencode(None);
+        mutate(&mut profile.caps);
+        profile
+    }
+
+    /// `/backend` must not imply that form elicitation works when the client
+    /// cannot decode it; it names the channel questions actually use.
+    #[test]
+    fn names_the_question_extension_instead_of_form_elicitation() {
+        let profile = profile_with(|caps| {
+            caps.form_elicitation = false;
+            caps.question_ext = true;
+        });
+        let line = describe_questions(&profile).expect("a question line");
+        assert!(line.contains("ask_user_question extension"), "{line}");
+        assert!(!describe_capabilities(&profile).contains("form elicitation"));
+    }
+
+    /// With neither channel, the report says so and does not claim a feature.
+    #[test]
+    fn reports_questions_as_unsupported_without_a_channel() {
+        let profile = profile_with(|caps| {
+            caps.form_elicitation = false;
+            caps.question_ext = false;
+        });
+        let line = describe_questions(&profile).expect("a question line");
+        assert!(line.contains("unsupported"), "{line}");
+        assert!(line.contains("assumptions"), "{line}");
     }
 }

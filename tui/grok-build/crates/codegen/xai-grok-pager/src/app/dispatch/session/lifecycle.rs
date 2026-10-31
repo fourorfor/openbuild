@@ -1531,8 +1531,28 @@ pub(in crate::app::dispatch) fn handle_session_created(
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
         }
+        let had_deferred_mode = deferred_mode.is_some();
         let mut effects =
             deferred_mode_effects(&session_id_clone, deferred_mode, deferred_permission);
+        // Remembered default: only a session with no explicit pre-session mode
+        // picks up `uncensored`, and only when the catalog actually offers it.
+        // `uncensored` is not a `SessionMode` variant, so it goes out as a raw
+        // id; the badge reads the optimistic pending flag until the kernel's
+        // config-option update confirms it.
+        if !had_deferred_mode
+            && app.uncensored_default
+            && !app.reconnect_pending
+            && agent
+                .available_modes
+                .iter()
+                .any(|mode| mode.id.0.as_ref() == openbuild_backend::plugin::UNCENSORED_AGENT_ID)
+        {
+            agent.uncensored_mode_pending = Some(true);
+            effects.push(Effect::SetSessionMode {
+                session_id: session_id_clone.clone(),
+                mode_id: acp::SessionModeId::new(openbuild_backend::plugin::UNCENSORED_AGENT_ID),
+            });
+        }
         let mut drain = if app.reconnect_pending {
             QueueDrain {
                 effects: vec![],
@@ -1669,8 +1689,28 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
         }
+        let had_deferred_mode = deferred_mode.is_some();
         let mut effects =
             deferred_mode_effects(&session_id_clone, deferred_mode, deferred_permission);
+        // Remembered default: only a session with no explicit pre-session mode
+        // picks up `uncensored`, and only when the catalog actually offers it.
+        // `uncensored` is not a `SessionMode` variant, so it goes out as a raw
+        // id; the badge reads the optimistic pending flag until the kernel's
+        // config-option update confirms it.
+        if !had_deferred_mode
+            && app.uncensored_default
+            && !app.reconnect_pending
+            && agent
+                .available_modes
+                .iter()
+                .any(|mode| mode.id.0.as_ref() == openbuild_backend::plugin::UNCENSORED_AGENT_ID)
+        {
+            agent.uncensored_mode_pending = Some(true);
+            effects.push(Effect::SetSessionMode {
+                session_id: session_id_clone.clone(),
+                mode_id: acp::SessionModeId::new(openbuild_backend::plugin::UNCENSORED_AGENT_ID),
+            });
+        }
         let mut drain = if app.reconnect_pending {
             QueueDrain {
                 effects: vec![],

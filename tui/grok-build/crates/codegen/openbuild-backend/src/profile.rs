@@ -42,6 +42,9 @@ pub struct Capabilities {
     // opencode extensions
     pub child_session_updates: bool,
     pub form_elicitation: bool,
+    /// The kernel accepts `_x.ai/ask_user_question` extension requests, so
+    /// question forms travel over that channel instead of form elicitation.
+    pub question_ext: bool,
     pub config_options: bool,
     // grok private extensions
     pub ext_queue: bool,
@@ -151,10 +154,18 @@ impl BackendProfile {
             .unwrap_or(false);
         if kind == BackendKind::OpenCode {
             // The kernel advertises config options on every session/new and
-            // accepts session/set_config_option; form elicitation is declared
-            // by our own initialize request.
+            // accepts session/set_config_option.
             profile.caps.config_options = true;
-            profile.caps.form_elicitation = true;
+            // Form elicitation is NOT advertised by this client: the Rust ACP
+            // client cannot decode `elicitation/create`, so declaring it made
+            // the kernel fail the form with method-not-found and report a fake
+            // "user dismissed this question". The capability therefore follows
+            // what we actually send (nothing), not what the kernel supports.
+            profile.caps.form_elicitation = false;
+            // `client_capabilities_meta` always sends this key for the OpenCode
+            // backend, so the kernel routes question forms over the
+            // `_x.ai/ask_user_question` extension request.
+            profile.caps.question_ext = true;
         }
         profile
     }
@@ -280,6 +291,29 @@ mod tests {
         assert_eq!(profile.kind, BackendKind::OpenCode);
         assert!(!profile.caps.ext_queue);
         assert!(profile.caps.config_options);
+    }
+
+    /// The Rust ACP client cannot decode `elicitation/create`, so the profile
+    /// must not claim the capability. Claiming it made the kernel answer a
+    /// failed form with a fake "user dismissed this question".
+    #[test]
+    fn opencode_never_claims_form_elicitation() {
+        let profile = BackendProfile::detect(&response(json!({})), None);
+        assert!(!profile.caps.form_elicitation);
+        assert!(profile.caps.question_ext);
+        // The pre-initialize profile must agree, or a pane would advertise a
+        // capability that disappears once the kernel answers.
+        let pre = BackendProfile::opencode(None);
+        assert!(!pre.caps.form_elicitation);
+    }
+
+    /// Questions travel over the extension channel for the kernel only; the
+    /// in-process grok shell has its own ACP handler.
+    #[test]
+    fn grok_shell_does_not_claim_the_question_extension() {
+        let profile = BackendProfile::detect(&response(json!({ "grokShell": true })), None);
+        assert!(!profile.caps.question_ext);
+        assert!(!profile.caps.form_elicitation);
     }
 
     #[test]

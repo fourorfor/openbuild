@@ -153,8 +153,38 @@ export type WireOptions = {
     request: CreateElicitationRequest,
     signal: AbortSignal,
   ) => CreateElicitationResponse | Promise<CreateElicitationResponse>
+  /**
+   * Handles the `_x.ai/ask_user_question` extension request the kernel sends
+   * when the client declares `openbuild/question-ext`.
+   */
+  readonly askUserQuestion?: (
+    request: AskUserQuestionRequest,
+    signal: AbortSignal,
+  ) => AskUserQuestionResponse | Promise<AskUserQuestionResponse>
   readonly cancelDrainTimeout?: Duration.Input
 }
+
+/** The subset of the TUI's `x.ai/ask_user_question` request this fixture models. */
+export type AskUserQuestionRequest = {
+  readonly sessionId: string
+  readonly toolCallId: string
+  readonly questions: ReadonlyArray<{
+    readonly question: string
+    readonly options: ReadonlyArray<{ readonly label: string; readonly description: string }>
+    readonly multi_select?: boolean
+  }>
+  readonly mode: string
+}
+
+export type AskUserQuestionResponse =
+  | {
+      readonly outcome: "accepted"
+      readonly answers: Record<string, ReadonlyArray<string>>
+      readonly annotations?: Record<string, { readonly notes?: string }>
+    }
+  | { readonly outcome: "cancelled" }
+  | { readonly outcome: "chat_about_this"; readonly partial_answers?: Record<string, string> }
+  | { readonly outcome: "skip_interview"; readonly partial_answers?: Record<string, string> }
 
 type FormReply = {
   readonly sessionID: string
@@ -173,6 +203,8 @@ export type InitializeOptions = {
   readonly childSessionUpdates?: boolean
   readonly terminalAuth?: boolean
   readonly elicitation?: boolean
+  /** Declares `openbuild/question-ext`, which routes question forms over the extension channel. */
+  readonly questionExt?: boolean
   readonly compaction?: CompactionCapabilities | null
 }
 
@@ -427,6 +459,7 @@ export async function startWire(options: WireOptions = {}) {
   const permissions: RequestPermissionRequest[] = []
   const childUpdates: Array<typeof ChildUpdate.Type> = []
   const elicitations: CreateElicitationRequest[] = []
+  const askQuestions: AskUserQuestionRequest[] = []
   // Client handlers record SDK-validated params; responses wait until they have seen every earlier agent message.
   const counts = { sent: 0, handled: 0 }
   const handled = <Value>(list: Value[], value: Value) => {
@@ -464,6 +497,13 @@ export async function startWire(options: WireOptions = {}) {
     .onRequest("elicitation/create", (ctx) => {
       handled(elicitations, ctx.params)
       return options.elicitation?.(ctx.params, ctx.signal) ?? { action: "cancel" }
+    })
+    .onRequest<AskUserQuestionRequest, AskUserQuestionResponse>("_x.ai/ask_user_question", (params) => {
+      if (typeof params !== "object" || params === null) throw new Error("bad question params")
+      return params as AskUserQuestionRequest
+    }, (ctx) => {
+      handled(askQuestions, ctx.params)
+      return options.askUserQuestion?.(ctx.params, ctx.signal) ?? { outcome: "cancelled" }
     })
     .connect({
       writable: clientStream.writable,
@@ -519,6 +559,7 @@ export async function startWire(options: WireOptions = {}) {
         ...(capabilities.compaction !== undefined ? { session: { compaction: capabilities.compaction } } : {}),
         _meta: {
           ...(capabilities.childSessionUpdates ? { "opencode/child-session-updates": true } : {}),
+          ...(capabilities.questionExt ? { "openbuild/question-ext": true } : {}),
           ...(capabilities.terminalAuth ? { "terminal-auth": true } : {}),
         },
       },
@@ -532,6 +573,7 @@ export async function startWire(options: WireOptions = {}) {
     permissions,
     childUpdates,
     elicitations,
+    askQuestions,
     logs,
     request,
     until,

@@ -96,6 +96,38 @@ impl ScrollbackState {
         self.entries.iter().map(|(id, entry)| (*id, entry))
     }
 
+    /// Assistant text of the last turn: every non-empty `AgentMessage` joined in
+    /// order, so a turn split across several blocks is read as one answer.
+    ///
+    /// Used by the uncensored text-refusal probe, which must judge only the
+    /// answer the model just produced, not earlier turns.
+    pub fn last_turn_agent_text(&self) -> String {
+        let Some(turn) = self.turns.last() else {
+            return String::new();
+        };
+        turn.range()
+            .filter_map(|index| match self.entry(index).map(|entry| &entry.block) {
+                Some(RenderBlock::AgentMessage(message)) => Some(message.text()),
+                _ => None,
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether the last turn contains any tool call block.
+    pub fn last_turn_has_tool_call(&self) -> bool {
+        let Some(turn) = self.turns.last() else {
+            return false;
+        };
+        turn.range().any(|index| {
+            matches!(
+                self.entry(index).map(|entry| &entry.block),
+                Some(RenderBlock::ToolCall(_))
+            )
+        })
+    }
+
     /// Common logic for jumping to an entry within a turn.
     ///
     /// Sets `current_turn`, resets scroll in SingleTurn mode, selects the entry, and scrolls so it sits at the top of the viewport.

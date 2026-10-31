@@ -730,6 +730,18 @@ pub enum Action {
     /// Switch this session to the optional direct content policy (H).
     /// Session-scoped; never changes the permission mode.
     SetUncensoredMode(bool),
+    /// Apply a `/uncensored` menu answer: switch this session and optionally
+    /// remember the choice for new sessions.
+    UncensoredAnswered {
+        on: bool,
+        remember: bool,
+    },
+    /// Open the `/uncensored` option menu as a local modal.
+    OpenUncensoredMenu,
+    /// Run `/uncensored-edit`: `args` is the raw tail after the command name.
+    UncensoredEdit {
+        args: String,
+    },
     /// Show `/uncensored status`: mode, model, and installed plugin state.
     ShowUncensoredStatus,
     /// `/login`: open the third-party provider setup wizard.

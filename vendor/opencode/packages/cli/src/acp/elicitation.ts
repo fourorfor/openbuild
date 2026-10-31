@@ -16,6 +16,33 @@ export type AskedForm = Omit<Form.Info, "id"> & { readonly id: string }
 type InputField = Exclude<Form.Field, Form.ExternalField>
 type SelectField = Form.StringField | Form.MultiselectField
 
+/**
+ * The client-side extension the grok-derived TUI already implements
+ * (`x.ai/ask_user_question`). ACP's Rust client decodes any `_`-prefixed method
+ * as an extension request and strips the prefix, so the kernel sends the
+ * underscore form and the pager dispatches the bare name.
+ */
+const QuestionExtMethod = "_x.ai/ask_user_question"
+
+/** Matches the TUI's own 30-minute budget for a whole questionnaire. */
+const QuestionExtTimeout = "30 minutes" as const
+
+/** One question as the TUI's `x.ai/ask_user_question` request expects it. */
+type ExtQuestion = {
+  readonly question: string
+  readonly options: Array<{ readonly label: string; readonly description: string }>
+  readonly multi_select: boolean
+}
+
+/** The subset of `AskUserQuestionExtResponse` this module reads. */
+const ExtResponse = Schema.Struct({
+  outcome: Schema.String,
+  answers: Schema.optional(Schema.Record(Schema.String, Schema.Array(Schema.String))),
+  annotations: Schema.optional(
+    Schema.Record(Schema.String, Schema.Struct({ notes: Schema.optional(Schema.String) })),
+  ),
+})
+
 const QuestionKind = "question"
 // Form mode must not collect secrets; elicit only flows known to be credential-free.
 const ElicitedKind = Schema.Struct({ kind: Schema.Literals([QuestionKind, "websearch.provider"]) })
@@ -26,7 +53,8 @@ type Input = {
   readonly client: OpenCodeClient
   readonly connection: ACPConnection.Interface
   readonly form: Form.Info
-  readonly requestedSchema: ElicitationSchema
+  /** Only the elicitation path needs a schema; the extension path maps fields itself. */
+  readonly requestedSchema?: ElicitationSchema
   readonly clientSessionID: string
   readonly child?: ACPChild.Session
   readonly toolCallSent: boolean
@@ -34,6 +62,14 @@ type Input = {
 
 export const UnshownQuestionMessage =
   "The question couldn't be shown to the user in this client. Continue without an answer: make reasonable assumptions and state them, or ask the user in your reply if you can't proceed."
+
+/**
+ * Sent when the user really did cancel. The `question` tool only continues the
+ * turn when the cancellation carries a message; without one it raises
+ * `CancelledError`, which the runner turns into a `STEP_INTERRUPTED` decline.
+ */
+export const CancelledQuestionMessage =
+  "The user dismissed the question. Continue with reasonable assumptions and state them, or ask again in your reply if you cannot proceed."
 
 function cancel(client: OpenCodeClient, form: Form.Info, message?: string) {
   return client.session.form.cancel({ sessionID: form.sessionID, formID: form.id, message }).pipe(
@@ -96,14 +132,122 @@ export const ask = Effect.fnUntraced(function* (input: Input) {
   return answer(input.form, response) ?? "cancel"
 })
 
-export function respond(input: Input, outcome: Form.Answer | "cancel") {
-  if (outcome === "cancel") return cancel(input.client, input.form)
-  return input.client.session.form
-    .reply({ sessionID: input.form.sessionID, formID: input.form.id, answer: outcome })
+/**
+ * Ask a `question` form over the client's `x.ai/ask_user_question` extension.
+ *
+ * This is the channel the grok-derived TUI actually implements: it owns the
+ * overlay, multi-select, free-form input and child-session routing, so the
+ * kernel only maps fields in and answers back. Returns `"unshown"` when the form
+ * cannot be represented, which the caller settles through `cancelUnshown`.
+ */
+export const askExt = Effect.fnUntraced(function* (input: Input) {
+  const mapped = extQuestions(input.form)
+  if (mapped === undefined) return "unshown" as const
+  const source = input.toolCallSent ? Schema.decodeUnknownOption(ToolSource)(input.form.metadata) : Option.none()
+  const toolCallID = Option.getOrUndefined(Option.map(source, (metadata) => metadata.tool.id))
+  const response = yield* input.connection.extRequest(QuestionExtMethod, {
+    sessionId: input.clientSessionID,
+    // The TUI requires a non-empty toolCallId, but the kernel has none in
+    // background/child flows; the form id is stable for the same purpose.
+    toolCallId: ACPChild.toolCallID(input.child, toolCallID ?? input.form.id),
+    questions: mapped.questions,
+    mode: "default",
+  }).pipe(Effect.timeoutOption(QuestionExtTimeout))
+  // The pager keeps an unattached question pending until its session attaches,
+  // so a client that never answers must not hold the turn forever.
+  if (Option.isNone(response)) return "unshown" as const
+  return extAnswer(input.form, mapped, response.value) ?? "cancel"
+})
+
+/**
+ * Whether the question extension can carry this form.
+ *
+ * The TUI only renders option lists plus a free-form row, so a form with
+ * numbers, booleans or credential-looking fields keeps the elicitation path
+ * (or `cancelUnshown`) instead of being silently mangled.
+ */
+export function extQuestions(
+  form: AskedForm,
+): { readonly questions: ExtQuestion[]; readonly keys: ReadonlyMap<string, string> } | undefined {
+  if (form.metadata?.kind !== QuestionKind) return undefined
+  if (form.fields.some((field) => field.type === "external")) return undefined
+  if (form.fields.some(credentialLike)) return undefined
+  const questions: ExtQuestion[] = []
+  const keys = new Map<string, string>()
+  for (const field of form.fields) {
+    if (field.type !== "string" && field.type !== "multiselect") return undefined
+    const text = dedupe(questions, field.description ?? field.title ?? field.key)
+    // `title` has no slot in the TUI's Question and would pollute the answer
+    // key, so it stays out of the wire payload.
+    questions.push({
+      question: text,
+      options: (field.options ?? []).map((option) => ({
+        label: option.label,
+        description: option.description ?? "",
+      })),
+      multi_select: field.type === "multiselect",
+    })
+    keys.set(text, field.key)
+  }
+  return { questions, keys }
+}
+
+function dedupe(questions: ReadonlyArray<ExtQuestion>, text: string) {
+  const taken = new Set(questions.map((question) => question.question))
+  if (!taken.has(text)) return text
+  let suffix = 2
+  while (taken.has(`${text} (${suffix})`)) suffix++
+  return `${text} (${suffix})`
+}
+
+function extAnswer(
+  form: AskedForm,
+  mapped: NonNullable<ReturnType<typeof extQuestions>>,
+  response: unknown,
+): Form.Answer | undefined {
+  const decoded = Schema.decodeUnknownOption(ExtResponse)(response)
+  if (Option.isNone(decoded) || decoded.value.outcome !== "accepted") return undefined
+  const { answers = {}, annotations = {} } = decoded.value
+  return Object.fromEntries(
+    [...mapped.keys].flatMap(([text, key]) => {
+      const labels = answers[text] ?? []
+      const field = form.fields.find((item) => item.key === key)
+      // A free-form-only answer arrives as the literal label "Other"; the typed
+      // text lives in `annotations[question].notes` and is the real answer.
+      const notes = annotations[text]?.notes
+      if (notes !== undefined && notes.trim() !== "") {
+        if (field?.type === "multiselect") return [[key, [...labels.filter((label) => label !== "Other"), notes]]]
+        return [[key, notes]]
+      }
+      if (labels.length === 0) return []
+      if (field?.type === "multiselect") return [[key, labels]]
+      return [[key, labels[0]!]]
+    }),
+  )
+}
+
+export function respond(input: Input, outcome: AskOutcome) {
+  return settle(input.client, input.form, outcome)
+}
+/** A question form outcome, including the "this client cannot show it" case. */
+export type AskOutcome = Form.Answer | "cancel" | "unshown"
+
+/**
+ * Settle a form for every non-answer outcome.
+ *
+ * `question` only continues the turn when a cancellation carries a message; a
+ * bare cancellation raises `CancelledError`, which the runner turns into a
+ * `STEP_INTERRUPTED` decline.
+ */
+function settle(client: OpenCodeClient, form: Form.Info, outcome: AskOutcome) {
+  if (outcome === "unshown") return cancelUnshown(client, form)
+  if (outcome === "cancel") return cancel(client, form, CancelledQuestionMessage)
+  return client.session.form
+    .reply({ sessionID: form.sessionID, formID: form.id, answer: outcome })
     .pipe(
       Effect.catchTag(["FormAlreadySettledError", "FormNotFoundError"], () => Effect.void),
       Effect.catch((cause) =>
-        Effect.logWarning("ACP form reply failed", cause).pipe(Effect.andThen(cancel(input.client, input.form))),
+        Effect.logWarning("ACP form reply failed", cause).pipe(Effect.andThen(cancel(client, form))),
       ),
     )
 }

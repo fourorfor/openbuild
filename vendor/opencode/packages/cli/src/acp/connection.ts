@@ -23,6 +23,12 @@ export interface Interface {
     params: RequestPermissionRequest,
   ) => Effect.Effect<RequestPermissionResponse, RequestError>
   readonly extNotification: (method: string, params: Record<string, unknown>) => Effect.Effect<void, RequestError>
+  /**
+   * Send a request to the client and wait for its response. `AgentContext.request`
+   * passes the method name through verbatim, which is how the kernel reaches a
+   * client-side extension such as `_x.ai/ask_user_question`.
+   */
+  readonly extRequest: (method: string, params: Record<string, unknown>) => Effect.Effect<unknown, RequestError>
   readonly createElicitation: (
     params: CreateElicitationRequest,
   ) => Effect.Effect<CreateElicitationResponse, RequestError>
@@ -56,6 +62,8 @@ export function make(app: AgentApp, stream: Stream) {
           agent.client.request(methods.client.session.requestPermission, params, { cancellationSignal: signal }),
         ),
       extNotification: (method, params) => promise(() => agent.client.notify(method, params)),
+      extRequest: (method, params) =>
+        promise((signal) => agent.client.request<unknown, Record<string, unknown>>(method, params, { cancellationSignal: signal })),
       createElicitation: (params) =>
         promise((signal) =>
           agent.client.request(methods.client.elicitation.create, params, { cancellationSignal: signal }),

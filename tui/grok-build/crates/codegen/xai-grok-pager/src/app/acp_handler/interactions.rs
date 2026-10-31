@@ -178,6 +178,7 @@ pub(crate) fn handle_ask_user_question(
                         LocalQuestionKind::AgentTypeMismatch { .. } => "model switch",
                         LocalQuestionKind::DeleteCurrentSession => "/delete",
                         LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
+                        LocalQuestionKind::UncensoredMenu => "/uncensored",
                         // The dedicated arm above owns this variant; the label is kept for exhaustiveness
                         LocalQuestionKind::PromptBlocked { .. } => "blocked prompt",
                     };

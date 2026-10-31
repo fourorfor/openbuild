@@ -131,6 +131,8 @@ xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
 gethostname = { workspace = true, optional = true }
 backon = { workspace = true }
 chrono = { workspace = true }
+# Policy snapshots and policySha256 for /uncensored-edit.
+sha2 = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 xai-grok-tools = { workspace = true }

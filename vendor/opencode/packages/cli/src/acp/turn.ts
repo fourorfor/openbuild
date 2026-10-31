@@ -231,18 +231,34 @@ export const make = Effect.fnUntraced(function* (input: {
       case "FormAsk":
         return Effect.gen(function* () {
           const capabilities = yield* Ref.get(input.capabilities)
-          const requestedSchema = ACPElicitation.requestedSchema(output.form, capabilities)
-          if (!requestedSchema) return yield* ACPElicitation.cancelUnshown(input.client, output.form)
           const elicitation = {
             client: input.client,
             connection: input.connection,
             form: output.form,
-            requestedSchema,
             clientSessionID: turn.ctx.sessionID,
             child: output.child,
             toolCallSent: !turn.background && (!output.child || !turn.ctx.childUpdates),
           }
-          yield* queueAsk(turn, output.form.id, ACPElicitation.ask(elicitation), "cancel", (outcome) =>
+          // The grok-derived TUI implements `x.ai/ask_user_question` and cannot
+          // decode `elicitation/create`, so prefer the extension channel when
+          // the client opted in. An older client never declares the key and
+          // keeps the cancelUnshown path instead of answering -32601.
+          if (capabilities.questionExt) {
+            // The extension request can still fail (client without the handler,
+            // timeout, cancel signal). Those are "could not show", not "user
+            // dismissed", so the fallback settles through `cancelUnshown`.
+            yield* queueAsk(
+              turn,
+              output.form.id,
+              ACPElicitation.askExt(elicitation),
+              "unshown",
+              (outcome) => ACPElicitation.respond(elicitation, outcome),
+            )
+            return
+          }
+          const requestedSchema = ACPElicitation.requestedSchema(output.form, capabilities)
+          if (!requestedSchema) return yield* ACPElicitation.cancelUnshown(input.client, output.form)
+          yield* queueAsk(turn, output.form.id, ACPElicitation.ask({ ...elicitation, requestedSchema }), "cancel", (outcome) =>
             ACPElicitation.respond(elicitation, outcome),
           )
         })

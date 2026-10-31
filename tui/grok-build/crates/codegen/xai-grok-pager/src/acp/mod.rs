@@ -351,6 +351,20 @@ pub async fn connect_opencode_slot(
                 );
             }
         }
+
+        // The policy files are user-visible content, so they are installed only
+        // when missing. A failure must not block the kernel: the plugin falls
+        // back to the bundled defaults.
+        let policies = openbuild_backend::plugin::ensure_policy_files();
+        for error in &policies.errors {
+            tracing::warn!(%error, "uncensored policy install failed");
+        }
+        if !policies.written.is_empty() {
+            tracing::info!(
+                written = policies.written.len(),
+                "uncensored policy files created"
+            );
+        }
     }
 
     let spec = openbuild_backend::spawn::spec_for_profile(kernel_path, profile_launch)
@@ -655,6 +669,11 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
             // Ask the kernel for the URL/password of the server that owns this
             // ACP session, so the optional HTTP feed shares its event bus.
             "openbuild/http-feed": true,
+            // The kernel may hand question forms to this client through the
+            // `_x.ai/ask_user_question` extension request. Declaring it is what
+            // lets the kernel skip ACP form elicitation, which this Rust ACP
+            // client cannot decode (it answers `-32601 method_not_found`).
+            "openbuild/question-ext": true,
         });
     }
     let hunk_mode =
@@ -704,19 +723,18 @@ pub(crate) struct InitializedAgent {
 async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<InitializedAgent> {
     let mut meta = build_initialize_meta(flags).as_object().cloned();
     crate::app::session_startup::stamp_phase_traceparent(&mut meta);
-    let mut capabilities = acp::ClientCapabilities::new()
+    let capabilities = acp::ClientCapabilities::new()
         .fs(acp::FileSystemCapabilities::new()
             .read_text_file(flags.fs_read)
             .write_text_file(flags.fs_write))
         .terminal(flags.terminal)
         .meta(client_capabilities_meta(flags).as_object().cloned());
-    if openbuild_backend::profile::is_opencode() {
-        // opencode's question tool uses ACP form elicitation. Without this the
-        // kernel cancels the form and returns the question to the model.
-        capabilities = capabilities.elicitation(
-            acp::ElicitationCapabilities::new().form(acp::ElicitationFormCapabilities::default()),
-        );
-    }
+    // Form elicitation is intentionally NOT declared: this Rust ACP client
+    // (agent-client-protocol 0.10.4) has no `create_elicitation` handler, so a
+    // declared capability makes the kernel send `elicitation/create` and get
+    // `-32601 method_not_found`, which surfaced as the fake "user dismissed this
+    // question" failure. Questions travel over the `openbuild/question-ext`
+    // capability instead (see `client_capabilities_meta`).
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(capabilities)
         .meta(meta);

@@ -1302,6 +1302,9 @@ pub struct AgentView {
     /// Prompt id of the single automatic retry sent after a provider refusal.
     /// Cleared when that retry turn ends, so a second refusal cannot loop.
     pub(crate) uncensored_retry_pending: bool,
+    /// A text-level refusal probe retry was already sent in this session.
+    /// The probe is a heuristic, so it may fire only once per session.
+    pub(crate) uncensored_probe_retried: bool,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.
@@ -1704,6 +1707,25 @@ fn translate_local_submit(
             InputOutcome::Action(Action::DeleteCurrentSessionAnswered {
                 confirmed: *idx == 0,
             })
+        }
+        LocalQuestionKind::UncensoredMenu => {
+            // 0/1 turn it on (with or without remembering), 2/3 turn it off,
+            // 4 opens the editor, 5 opens the variant picker, 6 prints status.
+            let (on, remember) = match *idx {
+                0 => (true, false),
+                1 => (true, true),
+                2 => (false, false),
+                3 => (false, true),
+                4 => return InputOutcome::Action(Action::UncensoredEdit { args: String::new() }),
+                5 => {
+                    return InputOutcome::Action(Action::UncensoredEdit {
+                        args: "--variant ".to_string(),
+                    });
+                }
+                6 => return InputOutcome::Action(Action::ShowUncensoredStatus),
+                _ => return InputOutcome::Changed,
+            };
+            InputOutcome::Action(Action::UncensoredAnswered { on, remember })
         }
     }
 }

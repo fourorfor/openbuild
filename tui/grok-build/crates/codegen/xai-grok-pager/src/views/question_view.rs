@@ -119,6 +119,10 @@ pub enum LocalQuestionKind {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DeleteCurrentSession,
+    /// Modal opened by `/uncensored` to choose the mode and whether to remember
+    /// it. On submit, the selected option index becomes an
+    /// [`crate::app::actions::Action::UncensoredAnswered`].
+    UncensoredMenu,
 }
 
 /// Complete state for the question view overlay. Created when an `x.ai/ask_user_question`

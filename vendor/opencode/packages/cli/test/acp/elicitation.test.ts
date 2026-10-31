@@ -123,8 +123,132 @@ describe("acp elicitation over the wire", () => {
     expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
     expect(acp.elicitations).toHaveLength(ids.length)
     expect(acp.server.cancelledForms.map((item) => item.formID)).toEqual(ids)
-    expect(acp.server.cancelledForms.map((item) => item.message)).toEqual(ids.map(() => undefined))
+    // Every non-accept outcome explains itself, so the question tool returns a
+    // normal tool failure instead of a `CancelledError` that interrupts the step.
+    expect(acp.server.cancelledForms.map((item) => item.message)).toEqual(
+      ids.map(() => ACPElicitation.CancelledQuestionMessage),
+    )
     expect(acp.server.repliedForms).toEqual([])
     expect(acp.server.interrupts).toEqual([])
+  })
+})
+
+describe("acp question over the ask_user_question extension", () => {
+  test("routes a question form to the client extension and replies with the answer", async () => {
+    await using acp = await startSession({
+      capabilities: { questionExt: true },
+      onPrompt: ({ sessionID, id }) => [
+        delivered(sessionID, id),
+        toolStarted(sessionID, "call_question", "question"),
+        questions(sessionID),
+      ],
+      askUserQuestion: () => ({
+        outcome: "accepted",
+        answers: { "Which runtime?": ["Bun"], "What matters?": ["Fast"] },
+      }),
+      onFormReply: ({ sessionID, formID }) => [
+        ephemeralEvent("form.replied", { sessionID, id: formID, answer: {} }),
+        toolSucceeded(sessionID, "call_question", {}, "answered"),
+        succeeded(sessionID),
+      ],
+    })
+
+    expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
+    // No elicitation request: this client never declared the capability, so
+    // sending one would have failed with method-not-found.
+    expect(acp.elicitations).toEqual([])
+    expect(acp.askQuestions).toHaveLength(1)
+    expect(acp.askQuestions[0]).toMatchObject({
+      sessionId: acp.sessionId,
+      toolCallId: "call_question",
+      mode: "default",
+      questions: [
+        { question: "Which runtime?", multi_select: false },
+        { question: "What matters?", multi_select: true },
+      ],
+    })
+    expect(acp.server.repliedForms).toEqual([
+      { sessionID: acp.sessionId, formID: "frm_question", answer: { q0: "Bun", q1: ["Fast"] } },
+    ])
+    expect(acp.server.cancelledForms).toEqual([])
+  })
+
+  test("prefers free-form notes over the literal Other label", async () => {
+    await using acp = await startSession({
+      capabilities: { questionExt: true },
+      onPrompt: ({ sessionID, id }) => [
+        delivered(sessionID, id),
+        toolStarted(sessionID, "call_question", "question"),
+        questions(sessionID),
+      ],
+      askUserQuestion: () => ({
+        outcome: "accepted",
+        answers: { "Which runtime?": ["Other"] },
+        annotations: { "Which runtime?": { notes: "Deno" } },
+      }),
+      onFormReply: ({ sessionID }) => [succeeded(sessionID)],
+    })
+
+    expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
+    expect(acp.server.repliedForms[0]?.answer).toEqual({ q0: "Deno" })
+  })
+
+  test("a cancelled extension request continues the turn with an explanatory message", async () => {
+    await using acp = await startSession({
+      capabilities: { questionExt: true },
+      onPrompt: ({ sessionID, id }) => [
+        delivered(sessionID, id),
+        toolStarted(sessionID, "call_question", "question"),
+        questions(sessionID),
+      ],
+      askUserQuestion: () => ({ outcome: "cancelled" }),
+      onFormCancel: ({ sessionID }) => [succeeded(sessionID)],
+    })
+
+    expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
+    expect(acp.server.repliedForms).toEqual([])
+    expect(acp.server.cancelledForms.map((item) => item.formID)).toEqual(["frm_question"])
+    expect(acp.server.cancelledForms.map((item) => item.message)).toEqual([
+      ACPElicitation.CancelledQuestionMessage,
+    ])
+  })
+
+  test("an older client without the capability keeps the cancelUnshown path", async () => {
+    await using acp = await startSession({
+      capabilities: {},
+      onPrompt: ({ sessionID, id }) => [
+        delivered(sessionID, id),
+        toolStarted(sessionID, "call_question", "question"),
+        questions(sessionID),
+      ],
+      onFormCancel: ({ sessionID }) => [succeeded(sessionID)],
+    })
+
+    expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
+    expect(acp.askQuestions).toEqual([])
+    expect(acp.elicitations).toEqual([])
+    expect(acp.server.cancelledForms.map((item) => item.message)).toEqual([
+      ACPElicitation.UnshownQuestionMessage,
+    ])
+  })
+
+  test("a failing extension request degrades to cancelUnshown instead of a dismissal", async () => {
+    await using acp = await startSession({
+      capabilities: { questionExt: true },
+      onPrompt: ({ sessionID, id }) => [
+        delivered(sessionID, id),
+        toolStarted(sessionID, "call_question", "question"),
+        questions(sessionID),
+      ],
+      askUserQuestion: () => {
+        throw new Error("question UI failed")
+      },
+      onFormCancel: ({ sessionID }) => [succeeded(sessionID)],
+    })
+
+    expect((await acp.prompt(acp.sessionId, "hello")).stopReason).toBe("end_turn")
+    expect(acp.server.cancelledForms.map((item) => item.message)).toEqual([
+      ACPElicitation.UnshownQuestionMessage,
+    ])
   })
 })

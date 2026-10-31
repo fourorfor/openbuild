@@ -1,0 +1,11 @@
+dsh-purge 1.1.85 — lib/default-prompt-inject.zh.md (verbatim, unmodified)
+Copyright 2026 YuJunZhiXue — https://github.com/YuJunZhiXue/dsh-purge
+Licensed under the Apache License, Version 2.0. Retain this notice.
+Local file: <config>/uncensored/policy.full.md
+sha256: 5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc (25727 bytes)
+
+Injection note: the first line is a bare ChatML marker
+(`<|im_start|>system:<project_instructions>`). OpenBuild strips that one line at
+injection time when `stripChatTemplateMarker` is true (the default), because it is a
+jailbreak fingerprint that raises the chance a relay or gateway rejects the request.
+The file on disk is never modified, so it stays byte-for-byte identical to upstream.

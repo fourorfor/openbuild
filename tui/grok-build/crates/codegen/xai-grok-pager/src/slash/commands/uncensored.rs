@@ -49,11 +49,14 @@ impl SlashCommand for UncensoredCommand {
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         match args.trim().to_ascii_lowercase().as_str() {
-            "" | "status" => CommandResult::Action(Action::ShowUncensoredStatus),
+            // No argument opens the menu: the point of v2 is that the user can
+            // see and change the mode without remembering the flags.
+            "" => CommandResult::Action(Action::OpenUncensoredMenu),
+            "status" => CommandResult::Action(Action::ShowUncensoredStatus),
             "on" => CommandResult::Action(Action::SetUncensoredMode(true)),
             "off" => CommandResult::Action(Action::SetUncensoredMode(false)),
             other => CommandResult::Error(format!(
-                "Unknown /uncensored argument: {other}. Use on, off, or status."
+                "Unknown /uncensored argument: {other}. Use on, off, status, or no argument for the menu."
             )),
         }
     }
@@ -102,11 +105,19 @@ mod tests {
         ));
     }
 
+    /// Bare `/uncensored` opens the menu; `status` stays the text fast path.
     #[test]
-    fn bare_and_status_show_status() {
+    fn bare_opens_the_menu_and_status_stays_text() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        for args in ["", "status", " STATUS "] {
+        for args in ["", "   "] {
+            let mut context = ctx(&models, &bundle);
+            assert!(matches!(
+                UncensoredCommand.run(&mut context, args),
+                CommandResult::Action(Action::OpenUncensoredMenu)
+            ));
+        }
+        for args in ["status", " STATUS "] {
             let mut context = ctx(&models, &bundle);
             assert!(matches!(
                 UncensoredCommand.run(&mut context, args),
@@ -121,7 +132,7 @@ mod tests {
         let bundle = BundleState::default();
         let mut context = ctx(&models, &bundle);
         match UncensoredCommand.run(&mut context, "maybe") {
-            CommandResult::Error(message) => assert!(message.contains("on, off, or status")),
+            CommandResult::Error(message) => assert!(message.contains("on, off, status")),
             other => panic!("expected an error, got {other:?}"),
         }
     }

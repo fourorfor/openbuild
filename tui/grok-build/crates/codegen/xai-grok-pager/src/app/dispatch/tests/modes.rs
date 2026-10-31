@@ -2797,6 +2797,198 @@ fn uncensored_status_reports_mode_and_plugin() {
     assert!(text.contains("Plugin:"), "{text}");
     assert!(text.contains("Config:"), "{text}");
     assert!(text.contains("refusal_retry="), "{text}");
-    assert!(text.contains("Permissions are unchanged"), "{text}");
+    // The status names the provider-side limits instead of implying more.
+    assert!(text.contains("server-side semantic moderation unaffected"), "{text}");
     assert!(text.contains("may still refuse"), "{text}");
+    assert!(text.contains("Policy:"), "{text}");
+    assert!(text.contains("Retry:"), "{text}");
+}
+
+/// The menu must be a real modal, not just a printed block: the acceptance
+/// criterion for `/uncensored` with no argument.
+#[test]
+fn bare_uncensored_opens_a_local_menu_modal() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::OpenUncensoredMenu, &mut app);
+    assert!(effects.is_empty());
+    let agent = test_agent(&app, AgentId(0));
+    let question = agent.question_view.as_ref().expect("the menu must be open");
+    assert!(matches!(
+        question.local_kind,
+        Some(crate::views::question_view::LocalQuestionKind::UncensoredMenu)
+    ));
+    let options = &question.questions[0].options;
+    assert_eq!(options.len(), 7, "the documented seven rows");
+    assert!(options[1].label.contains("remember"));
+}
+
+#[test]
+fn menu_answers_map_to_the_mode_and_remember_flags() {
+    use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let question = agent.question_view.as_mut().expect("menu open");
+    // Index 1 is "On + remember": on, but the write is exercised separately.
+    question.selections[0] = QuestionSelection::Single(Some(1));
+    let question = agent.question_view.as_ref().unwrap();
+    let outcome = crate::app::agent_view::translate_local_submit_for_test(
+        question,
+        LocalQuestionKind::UncensoredMenu,
+        false,
+    );
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(Action::UncensoredAnswered { on, remember }) => {
+            assert!(on);
+            assert!(remember);
+        }
+        other => panic!("expected UncensoredAnswered, got {other:?}"),
+    }
+}
+
+#[test]
+fn menu_cancel_turns_the_mode_off_without_remembering() {
+    use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .uncensored_mode_active = true;
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let question = agent.question_view.as_mut().expect("menu open");
+    question.selections[0] = QuestionSelection::Single(Some(2));
+    let question = agent.question_view.as_ref().unwrap();
+    let outcome = crate::app::agent_view::translate_local_submit_for_test(
+        question,
+        LocalQuestionKind::UncensoredMenu,
+        false,
+    );
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(Action::UncensoredAnswered { on, remember }) => {
+            assert!(!on);
+            assert!(!remember);
+        }
+        other => panic!("expected UncensoredAnswered, got {other:?}"),
+    }
+}
+
+#[test]
+fn menu_edit_and_status_rows_route_to_their_actions() {
+    use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    for (index, expected) in [(4usize, "edit"), (6, "status")] {
+        let mut app = test_app_with_agent();
+        dispatch(Action::OpenUncensoredMenu, &mut app);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let question = agent.question_view.as_mut().expect("menu open");
+        question.selections[0] = QuestionSelection::Single(Some(index));
+        let question = agent.question_view.as_ref().unwrap();
+        match crate::app::agent_view::translate_local_submit_for_test(
+            question,
+            LocalQuestionKind::UncensoredMenu,
+            false,
+        ) {
+            crate::app::app_view::InputOutcome::Action(Action::UncensoredEdit { .. })
+                if expected == "edit" => {}
+            crate::app::app_view::InputOutcome::Action(Action::ShowUncensoredStatus)
+                if expected == "status" => {}
+            other => panic!("expected {expected}, got {other:?}"),
+        }
+    }
+}
+
+/// The remembered default is applied to a new session as a raw `uncensored`
+/// mode id, and the optimistic flag keeps the badge visible before the kernel
+/// confirms it.
+#[test]
+fn a_remembered_default_switches_a_new_session() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    app.uncensored_default = true;
+
+    let effects = create_session_with_uncensored_modes(&mut app);
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "uncensored"
+        )),
+        "expected the remembered default to switch the session: {effects:?}"
+    );
+    let agent = test_agent(&app, AgentId(0));
+    assert_eq!(agent.uncensored_mode_pending, Some(true));
+    assert_eq!(
+        agent.published_mode_label(),
+        Some(crate::views::prompt_widget::UNCENSORED_BADGE)
+    );
+}
+
+/// An explicit pre-session mode wins over the remembered default.
+#[test]
+fn an_explicit_mode_beats_the_remembered_default() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    app.uncensored_default = true;
+    app.agents.get_mut(&AgentId(0)).unwrap().deferred_session_mode =
+        Some(xai_grok_tools::types::SessionMode::Plan);
+
+    let effects = create_session_with_uncensored_modes(&mut app);
+
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "uncensored"
+        )),
+        "a deferred mode must win: {effects:?}"
+    );
+}
+
+/// Without the catalog entry the default is skipped, not sent blind.
+#[test]
+fn the_default_is_skipped_when_the_mode_is_not_published() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    app.uncensored_default = true;
+
+    let effects = create_session_with_published_modes(&mut app);
+
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "uncensored"
+        )),
+        "no published mode means no switch: {effects:?}"
+    );
+    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, None);
+}
+
+/// A new session whose catalog offers `uncensored` alongside `build`.
+fn create_session_with_uncensored_modes(app: &mut AppView) -> Vec<Effect> {
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: AgentId(0),
+            session_id: "sess-1".into(),
+            models: None,
+            modes: Some(acp::SessionModeState::new(
+                "build",
+                vec![
+                    acp::SessionMode::new("build", "Build"),
+                    acp::SessionMode::new("uncensored", "Uncensored"),
+                ],
+            )),
+        }),
+        app,
+    )
+}
+
+/// The menu must not disturb a session that already has a question open.
+#[test]
+fn the_menu_refuses_to_stack_on_an_open_question() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let first = test_agent(&app, AgentId(0)).question_view.as_ref().map(|q| q.tool_call_id.clone());
+    assert!(first.is_some());
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let second = test_agent(&app, AgentId(0)).question_view.as_ref().map(|q| q.tool_call_id.clone());
+    assert_eq!(first, second, "the original modal stays mounted");
 }

@@ -22,7 +22,7 @@ pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
 pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "2";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "3";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -369,6 +369,8 @@ pub enum RefusalRetry {
     Off,
     /// Resend one continuation prompt; a second refusal is not retried.
     Once,
+    /// Resend once, reframing the request without restating its content.
+    OnceRewrite,
 }
 
 impl RefusalRetry {
@@ -376,9 +378,165 @@ impl RefusalRetry {
         match self {
             Self::Off => "off",
             Self::Once => "once",
+            Self::OnceRewrite => "once+rewrite",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "once" => Some(Self::Once),
+            "once+rewrite" => Some(Self::OnceRewrite),
+            _ => None,
         }
     }
 }
+
+/// Text-level refusal detection. Off by default: a wrong guess re-sends a
+/// perfectly good answer, which costs more than it saves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextRefusalProbe {
+    #[default]
+    Off,
+    /// Record a hit in `events.jsonl` and mark the status line; change nothing.
+    Observe,
+    /// Also send one continuation, once per session.
+    RetryOnce,
+}
+
+impl TextRefusalProbe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::RetryOnce => "retry-once",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "observe" => Some(Self::Observe),
+            "retry-once" => Some(Self::RetryOnce),
+            _ => None,
+        }
+    }
+}
+
+/// Which policy text is injected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PolicySource {
+    /// OpenBuild's three-section compact policy (default).
+    #[default]
+    Compact,
+    /// The verbatim dsh-purge body in `policy.full.md`.
+    Full,
+    /// Compact first, the full body appended after it.
+    Hybrid,
+}
+
+impl PolicySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Full => "full",
+            Self::Hybrid => "hybrid",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "compact" => Some(Self::Compact),
+            "full" => Some(Self::Full),
+            "hybrid" => Some(Self::Hybrid),
+            _ => None,
+        }
+    }
+}
+
+/// Where the policy block sits relative to the base system prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PolicyPlacement {
+    /// Append after every existing part (default).
+    #[default]
+    Last,
+    /// Right after the base prompt, before later parts.
+    AfterBase,
+}
+
+impl PolicyPlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Last => "last",
+            Self::AfterBase => "after-base",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "last" => Some(Self::Last),
+            "after-base" => Some(Self::AfterBase),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a remembered `enabled` applies to new sessions or this process only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UncensoredScope {
+    /// New sessions start in uncensored; `/resume` keeps its own agent.
+    #[default]
+    NewSessions,
+    /// Remember for this process only; the next start clears `enabled`.
+    SessionOnly,
+}
+
+impl UncensoredScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewSessions => "new-sessions",
+            Self::SessionOnly => "session-only",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "new-sessions" => Some(Self::NewSessions),
+            "session-only" => Some(Self::SessionOnly),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the L0 `http.request` rewrite is installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProviderRewrite {
+    /// Install for the providers with a built-in rule or a user body overlay.
+    #[default]
+    Auto,
+    /// Install nothing, so the kernel never wraps the HTTP call.
+    Off,
+}
+
+impl ProviderRewrite {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// Current `uncensored.json` schema version.
+pub const UNCENSORED_CONFIG_VERSION: u64 = 2;
 
 /// Parsed optional configuration for the managed uncensored plugin.
 ///
@@ -388,9 +546,29 @@ impl RefusalRetry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UncensoredConfig {
     pub path: Option<PathBuf>,
+    /// `None` for a file that does not exist or a v1 file with no version key.
+    pub version: Option<u64>,
+    /// Whether new sessions start in `uncensored`.
+    pub enabled: bool,
+    pub scope: UncensoredScope,
+    /// `"auto"` or a variant id; `auto` resolves from the provider id.
+    pub variant: String,
     pub model: Option<String>,
+    pub fallback_model: Option<String>,
     pub inherit_subagents: bool,
     pub refusal_retry: RefusalRetry,
+    pub text_refusal_probe: TextRefusalProbe,
+    pub policy_placement: PolicyPlacement,
+    pub policy_source: PolicySource,
+    pub strip_chat_template_marker: bool,
+    pub policy_full_sha256: Option<String>,
+    pub provider_rewrite: ProviderRewrite,
+    /// Key = real provider id, value = fields shallow-merged into the request body.
+    pub provider_rewrite_body: serde_json::Map<String, serde_json::Value>,
+    pub policy_rev: u64,
+    pub policy_sha256: Option<String>,
+    /// A v1 file was read and has not been rewritten as v2 yet.
+    pub migrated: bool,
     pub error: Option<String>,
 }
 
@@ -398,9 +576,24 @@ impl Default for UncensoredConfig {
     fn default() -> Self {
         Self {
             path: None,
+            version: None,
+            enabled: false,
+            scope: UncensoredScope::NewSessions,
+            variant: "auto".to_string(),
             model: None,
+            fallback_model: None,
             inherit_subagents: false,
             refusal_retry: RefusalRetry::Off,
+            text_refusal_probe: TextRefusalProbe::Off,
+            policy_placement: PolicyPlacement::Last,
+            policy_source: PolicySource::Compact,
+            strip_chat_template_marker: true,
+            policy_full_sha256: None,
+            provider_rewrite: ProviderRewrite::Auto,
+            provider_rewrite_body: serde_json::Map::new(),
+            policy_rev: 0,
+            policy_sha256: None,
+            migrated: false,
             error: None,
         }
     }
@@ -420,10 +613,64 @@ impl UncensoredConfig {
             None => values,
         }
     }
+
+    /// Whether the remember-on flag should be applied to a new session.
+    pub fn default_on(&self) -> bool {
+        self.enabled && self.error.is_none()
+    }
+
+    /// `config: …` line for `/uncensored status`.
+    pub fn status_line(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("ERROR: {error}");
+        }
+        if self.migrated {
+            return format!(
+                "v2 (migrated from v1, not yet written); {}",
+                self.summary()
+            );
+        }
+        format!(
+            "v{} · enabled={} scope={} · {}",
+            self.version.unwrap_or(UNCENSORED_CONFIG_VERSION),
+            self.enabled,
+            self.scope.as_str(),
+            self.summary()
+        )
+    }
 }
 
 pub fn uncensored_config_path(config_dir: &Path) -> PathBuf {
     config_dir.join(UNCENSORED_CONFIG_FILE)
+}
+
+/// Directory holding the editable policy files and the event log.
+pub fn uncensored_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("uncensored")
+}
+
+pub fn uncensored_policy_path(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("policy.md")
+}
+
+pub fn uncensored_policy_default_path(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("policy.default.md")
+}
+
+pub fn uncensored_policy_full_path(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("policy.full.md")
+}
+
+pub fn uncensored_variants_dir(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("variants")
+}
+
+pub fn uncensored_history_dir(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("history")
+}
+
+pub fn uncensored_events_path(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("events.jsonl")
 }
 
 /// Inspect `<effective config>/uncensored.json`.
@@ -455,13 +702,10 @@ pub fn uncensored_config_in(config_dir: Option<&Path>) -> UncensoredConfig {
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(value) => match parse_uncensored_config(&value) {
-            Ok((model, inherit_subagents, refusal_retry)) => UncensoredConfig {
-                path: Some(path),
-                model,
-                inherit_subagents,
-                refusal_retry,
-                error: None,
-            },
+            Ok(mut parsed) => {
+                parsed.path = Some(path);
+                parsed
+            }
             Err(error) => UncensoredConfig {
                 path: Some(path),
                 error: Some(error),
@@ -476,7 +720,42 @@ pub fn uncensored_config_in(config_dir: Option<&Path>) -> UncensoredConfig {
     }
 }
 
-const CONFIG_KEYS: &[&str] = &[
+const CONFIG_KEYS_V2: &[&str] = &[
+    "version",
+    "enabled",
+    "scope",
+    "variant",
+    "model",
+    "fallbackModel",
+    "fallback_model",
+    "inheritSubagents",
+    "inherit_subagents",
+    "refusalRetry",
+    "refusal_retry",
+    "textRefusalProbe",
+    "text_refusal_probe",
+    "policyPlacement",
+    "policy_placement",
+    "policySource",
+    "policy_source",
+    "stripChatTemplateMarker",
+    "strip_chat_template_marker",
+    "policyFullSha256",
+    "policy_full_sha256",
+    "providerRewrite",
+    "provider_rewrite",
+    "providerRewriteBody",
+    "provider_rewrite_body",
+    "policyRev",
+    "policy_rev",
+    "policySha256",
+    "policy_sha256",
+    // Written by the v1 line of this file; accepted so an old file still loads.
+    "runtimeOnly",
+    "runtime_only",
+];
+
+const CONFIG_KEYS_V1: &[&str] = &[
     "model",
     "inheritSubagents",
     "inherit_subagents",
@@ -484,52 +763,244 @@ const CONFIG_KEYS: &[&str] = &[
     "refusal_retry",
 ];
 
-fn parse_uncensored_config(
-    value: &serde_json::Value,
-) -> Result<(Option<String>, bool, RefusalRetry), String> {
+/// Parse `uncensored.json` by its declared version.
+///
+/// v1 files must keep loading: the old parser rejected unknown keys outright,
+/// so a v1 file that gains no new fields still has to work, and a v1 file must
+/// not lose its `model` when it is rewritten.
+fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "config must be a JSON object".to_string())?;
+
+    let version = match object.get("version") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Number(number)) => Some(
+            number
+                .as_u64()
+                .ok_or_else(|| "version must be a non-negative integer".to_string())?,
+        ),
+        Some(_) => return Err("version must be a non-negative integer".to_string()),
+    };
+    if let Some(version) = version
+        && version > UNCENSORED_CONFIG_VERSION
+    {
+        return Err(format!(
+            "config: written by a newer OpenBuild (v{version}); this build understands v{UNCENSORED_CONFIG_VERSION}"
+        ));
+    }
+    let legacy = version.is_none() || version == Some(1);
+
+    let allowed: &[&str] = if legacy { CONFIG_KEYS_V1 } else { CONFIG_KEYS_V2 };
     let unknown: Vec<&str> = object
         .keys()
-        .filter(|key| !CONFIG_KEYS.contains(&key.as_str()))
+        .filter(|key| !allowed.contains(&key.as_str()))
         .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
         return Err(format!("unknown option(s): {}", unknown.join(", ")));
     }
 
-    let model = match object.get("model") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(text)) => {
-            let text = text.trim();
-            if !valid_model_ref(text) {
-                return Err(format!("model must be \"provider/model\", got {text:?}"));
-            }
-            Some(text.to_string())
-        }
-        Some(_) => return Err("model must be a non-empty string".to_string()),
-    };
-
-    let inherit_subagents = match alias_value(object, "inheritSubagents", "inherit_subagents")? {
-        None => false,
-        Some(serde_json::Value::Bool(value)) => *value,
-        Some(_) => return Err("inheritSubagents must be true or false".to_string()),
-    };
-
+    let model = optional_model(object.get("model"), "model")?;
+    let fallback_model = optional_model(
+        alias_value(object, "fallbackModel", "fallback_model")?,
+        "fallbackModel",
+    )?;
+    let inherit_subagents = boolean_alias(object, "inheritSubagents", "inherit_subagents")?
+        .unwrap_or(false);
     let refusal_retry = match alias_value(object, "refusalRetry", "refusal_retry")? {
         None => RefusalRetry::Off,
-        Some(serde_json::Value::String(text)) if text == "off" => RefusalRetry::Off,
-        Some(serde_json::Value::String(text)) if text == "once" => RefusalRetry::Once,
-        Some(serde_json::Value::String(text)) => {
-            return Err(format!(
-                "refusal_retry must be \"off\" or \"once\", got {text:?}"
-            ));
-        }
+        Some(serde_json::Value::String(text)) => RefusalRetry::parse(text).ok_or_else(|| {
+            format!("refusal_retry must be \"off\", \"once\" or \"once+rewrite\", got {text:?}")
+        })?,
         Some(_) => return Err("refusal_retry must be a string".to_string()),
     };
 
-    Ok((model, inherit_subagents, refusal_retry))
+    // A v1 file carries nothing beyond the three keys above.
+    if legacy {
+        return Ok(UncensoredConfig {
+            version: None,
+            model,
+            inherit_subagents,
+            refusal_retry,
+            migrated: true,
+            ..Default::default()
+        });
+    }
+
+    let enabled = match object.get("enabled") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("enabled must be true or false".to_string()),
+    };
+    // `runtimeOnly` was written by the session-only path; keep honouring it so a
+    // file from that build is not silently read as a permanent default.
+    let runtime_only = boolean_alias(object, "runtimeOnly", "runtime_only")?.unwrap_or(false);
+    let scope = match object.get("scope") {
+        None => UncensoredScope::NewSessions,
+        Some(serde_json::Value::String(text)) => UncensoredScope::parse(text)
+            .ok_or_else(|| format!("scope must be \"new-sessions\" or \"session-only\", got {text:?}"))?,
+        Some(_) => return Err("scope must be a string".to_string()),
+    };
+    let scope = if runtime_only {
+        UncensoredScope::SessionOnly
+    } else {
+        scope
+    };
+    let variant = match object.get("variant") {
+        None => "auto".to_string(),
+        Some(serde_json::Value::String(text)) if valid_variant_id(text) => text.clone(),
+        Some(serde_json::Value::String(text)) => {
+            return Err(format!(
+                "variant must be \"auto\" or a plain id, got {text:?}"
+            ));
+        }
+        Some(_) => return Err("variant must be a string".to_string()),
+    };
+
+    Ok(UncensoredConfig {
+        version: Some(UNCENSORED_CONFIG_VERSION),
+        enabled,
+        scope,
+        variant,
+        model,
+        fallback_model,
+        inherit_subagents,
+        refusal_retry,
+        text_refusal_probe: enum_alias(
+            object,
+            "textRefusalProbe",
+            "text_refusal_probe",
+            TextRefusalProbe::parse,
+            "\"off\", \"observe\" or \"retry-once\"",
+        )?
+        .unwrap_or_default(),
+        policy_placement: enum_alias(
+            object,
+            "policyPlacement",
+            "policy_placement",
+            PolicyPlacement::parse,
+            "\"last\" or \"after-base\"",
+        )?
+        .unwrap_or_default(),
+        policy_source: enum_alias(
+            object,
+            "policySource",
+            "policy_source",
+            PolicySource::parse,
+            "\"compact\", \"full\" or \"hybrid\"",
+        )?
+        .unwrap_or_default(),
+        strip_chat_template_marker: boolean_alias(
+            object,
+            "stripChatTemplateMarker",
+            "strip_chat_template_marker",
+        )?
+        .unwrap_or(true),
+        policy_full_sha256: optional_string_alias(
+            object,
+            "policyFullSha256",
+            "policy_full_sha256",
+        )?,
+        provider_rewrite: enum_alias(
+            object,
+            "providerRewrite",
+            "provider_rewrite",
+            ProviderRewrite::parse,
+            "\"auto\" or \"off\"",
+        )?
+        .unwrap_or_default(),
+        provider_rewrite_body: match alias_value(object, "providerRewriteBody", "provider_rewrite_body")? {
+            None => serde_json::Map::new(),
+            Some(serde_json::Value::Object(map)) => map
+                .iter()
+                .map(|(key, value)| {
+                    if !value.is_object() {
+                        return Err(format!(
+                            "providerRewriteBody.{key} must be a JSON object of request fields"
+                        ));
+                    }
+                    Ok((key.clone(), value.clone()))
+                })
+                .collect::<Result<serde_json::Map<String, serde_json::Value>, String>>()?,
+            Some(_) => return Err("providerRewriteBody must be a JSON object".to_string()),
+        },
+        policy_rev: match alias_value(object, "policyRev", "policy_rev")? {
+            None => 0,
+            Some(serde_json::Value::Number(number)) => number
+                .as_u64()
+                .ok_or_else(|| "policyRev must be a non-negative integer".to_string())?,
+            Some(_) => return Err("policyRev must be a non-negative integer".to_string()),
+        },
+        policy_sha256: optional_string_alias(object, "policySha256", "policy_sha256")?,
+        migrated: false,
+        ..Default::default()
+    })
+}
+
+fn optional_model(
+    value: Option<&serde_json::Value>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            if !valid_model_ref(text) {
+                return Err(format!("{name} must be \"provider/model\", got {text:?}"));
+            }
+            Ok(Some(text.to_string()))
+        }
+        Some(_) => Err(format!("{name} must be a non-empty string")),
+    }
+}
+
+fn optional_string_alias(
+    object: &serde_json::Map<String, serde_json::Value>,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<String>, String> {
+    match alias_value(object, primary, alias)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(format!("{primary} must be a string")),
+    }
+}
+
+fn boolean_alias(
+    object: &serde_json::Map<String, serde_json::Value>,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<bool>, String> {
+    match alias_value(object, primary, alias)? {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(format!("{primary} must be true or false")),
+    }
+}
+
+fn enum_alias<T: Copy>(
+    object: &serde_json::Map<String, serde_json::Value>,
+    primary: &str,
+    alias: &str,
+    parse: fn(&str) -> Option<T>,
+    expected: &str,
+) -> Result<Option<T>, String> {
+    match alias_value(object, primary, alias)? {
+        None => Ok(None),
+        Some(serde_json::Value::String(text)) => parse(text)
+            .map(Some)
+            .ok_or_else(|| format!("{primary} must be {expected}, got {text:?}")),
+        Some(_) => Err(format!("{primary} must be a string")),
+    }
+}
+
+fn valid_variant_id(value: &str) -> bool {
+    value == "auto"
+        || (!value.is_empty()
+            && value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')))
 }
 
 fn alias_value<'a>(
@@ -560,6 +1031,322 @@ fn valid_model_ref(value: &str) -> bool {
         Some((id, variant)) => {
             !id.is_empty() && id.trim() == id && !variant.is_empty() && !variant.contains('#')
         }
+    }
+}
+
+/// Write the remember-on state into `<config>/uncensored.json`.
+///
+/// A v1 file is rewritten as v2, but only after a copy of the original is kept
+/// in `uncensored/history/uncensored.v1.json`, so a migration never loses the
+/// user's own `model` line.
+pub fn remember_uncensored(
+    enabled: bool,
+    scope: UncensoredScope,
+    variant: Option<&str>,
+) -> Result<PathBuf, String> {
+    let Some(config_dir) = effective_config_dir() else {
+        return Err("no config directory".to_string());
+    };
+    remember_uncensored_in(&config_dir, enabled, scope, variant)
+}
+
+/// [`remember_uncensored`] under an explicit config directory.
+pub fn remember_uncensored_in(
+    config_dir: &Path,
+    enabled: bool,
+    scope: UncensoredScope,
+    variant: Option<&str>,
+) -> Result<PathBuf, String> {
+    let path = uncensored_config_path(config_dir);
+    let existing = uncensored_config_in(Some(config_dir));
+    if let Some(error) = existing.error.as_deref() {
+        // A broken file is not something to overwrite silently: the user needs
+        // to see the parse error, not lose the file to a defaults rewrite.
+        return Err(format!("refusing to overwrite an unreadable config: {error}"));
+    }
+    if existing.migrated {
+        backup_v1_config(config_dir)?;
+    }
+    let document = serde_json::json!({
+        "version": UNCENSORED_CONFIG_VERSION,
+        "enabled": enabled,
+        "scope": scope.as_str(),
+        "variant": variant.unwrap_or(existing.variant.as_str()),
+        "model": existing.model,
+        "fallbackModel": existing.fallback_model,
+        "inheritSubagents": existing.inherit_subagents,
+        "refusalRetry": existing.refusal_retry.as_str(),
+        "textRefusalProbe": existing.text_refusal_probe.as_str(),
+        "policyPlacement": existing.policy_placement.as_str(),
+        "policySource": existing.policy_source.as_str(),
+        "stripChatTemplateMarker": existing.strip_chat_template_marker,
+        "policyFullSha256": existing.policy_full_sha256,
+        "providerRewrite": existing.provider_rewrite.as_str(),
+        "providerRewriteBody": existing.provider_rewrite_body,
+        "policyRev": existing.policy_rev,
+        "policySha256": existing.policy_sha256,
+    });
+    write_config_atomic(&path, &document)?;
+    Ok(path)
+}
+
+/// Update one config field without disturbing the rest of the file.
+pub fn update_uncensored_config(
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<PathBuf, String> {
+    let Some(config_dir) = effective_config_dir() else {
+        return Err("no config directory".to_string());
+    };
+    update_uncensored_config_in(&config_dir, edit)
+}
+
+/// [`update_uncensored_config`] under an explicit config directory.
+pub fn update_uncensored_config_in(
+    config_dir: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<PathBuf, String> {
+    let path = uncensored_config_path(config_dir);
+    let existing = uncensored_config_in(Some(config_dir));
+    if let Some(error) = existing.error.as_deref() {
+        return Err(format!("refusing to overwrite an unreadable config: {error}"));
+    }
+    if existing.migrated {
+        backup_v1_config(config_dir)?;
+    }
+    let mut document = serde_json::Map::new();
+    document.insert("version".into(), serde_json::json!(UNCENSORED_CONFIG_VERSION));
+    document.insert("enabled".into(), serde_json::json!(existing.enabled));
+    document.insert("scope".into(), serde_json::json!(existing.scope.as_str()));
+    document.insert("variant".into(), serde_json::json!(existing.variant));
+    document.insert("model".into(), serde_json::json!(existing.model));
+    document.insert(
+        "fallbackModel".into(),
+        serde_json::json!(existing.fallback_model),
+    );
+    document.insert(
+        "inheritSubagents".into(),
+        serde_json::json!(existing.inherit_subagents),
+    );
+    document.insert(
+        "refusalRetry".into(),
+        serde_json::json!(existing.refusal_retry.as_str()),
+    );
+    document.insert(
+        "textRefusalProbe".into(),
+        serde_json::json!(existing.text_refusal_probe.as_str()),
+    );
+    document.insert(
+        "policyPlacement".into(),
+        serde_json::json!(existing.policy_placement.as_str()),
+    );
+    document.insert(
+        "policySource".into(),
+        serde_json::json!(existing.policy_source.as_str()),
+    );
+    document.insert(
+        "stripChatTemplateMarker".into(),
+        serde_json::json!(existing.strip_chat_template_marker),
+    );
+    document.insert(
+        "policyFullSha256".into(),
+        serde_json::json!(existing.policy_full_sha256),
+    );
+    document.insert(
+        "providerRewrite".into(),
+        serde_json::json!(existing.provider_rewrite.as_str()),
+    );
+    document.insert(
+        "providerRewriteBody".into(),
+        serde_json::Value::Object(existing.provider_rewrite_body.clone()),
+    );
+    document.insert("policyRev".into(), serde_json::json!(existing.policy_rev));
+    document.insert(
+        "policySha256".into(),
+        serde_json::json!(existing.policy_sha256),
+    );
+    edit(&mut document);
+    write_config_atomic(&path, &serde_json::Value::Object(document))?;
+    Ok(path)
+}
+
+fn backup_v1_config(config_dir: &Path) -> Result<(), String> {
+    let source = uncensored_config_path(config_dir);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let history = uncensored_history_dir(config_dir);
+    fs::create_dir_all(&history).map_err(|error| format!("cannot create history dir: {error}"))?;
+    let target = history.join("uncensored.v1.json");
+    if target.exists() {
+        return Ok(());
+    }
+    fs::copy(&source, &target).map_err(|error| format!("cannot back up v1 config: {error}"))?;
+    Ok(())
+}
+
+fn write_config_atomic(path: &Path, document: &serde_json::Value) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| "config path has no parent directory".to_string())?;
+    fs::create_dir_all(directory).map_err(|error| format!("cannot create config dir: {error}"))?;
+    let text = serde_json::to_string_pretty(document)
+        .map_err(|error| format!("cannot serialize config: {error}"))?;
+    let temporary = directory.join(format!(".{UNCENSORED_CONFIG_FILE}.tmp"));
+    fs::write(&temporary, text + "\n").map_err(|error| format!("cannot write config: {error}"))?;
+    if path.exists()
+        && let Err(error) = fs::remove_file(path)
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("cannot replace config: {error}"));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("cannot replace config: {error}"));
+    }
+    Ok(())
+}
+
+/// The built-in compact policy. `policy.default.md` mirrors it so the user can
+/// diff and reset against it.
+pub const POLICY_DEFAULT: &str = include_str!("../plugin/policy.default.md");
+
+/// The dsh-purge 1.1.85 body, kept byte-for-byte (Apache-2.0, see
+/// `NOTICE-dsh-purge.txt`). Never edited by this crate.
+pub const POLICY_FULL: &str = include_str!("../plugin/policy.full.md");
+
+const NOTICE_DSH: &str = include_str!("../plugin/NOTICE-dsh-purge.txt");
+
+/// What [`ensure_policy_files_in`] wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyInstallOutcome {
+    pub written: Vec<PathBuf>,
+    pub errors: Vec<String>,
+}
+
+/// Install the policy files a fresh setup needs.
+///
+/// Unlike the managed plugin, these are user-visible content: a file that
+/// already exists is never overwritten, because that would silently discard the
+/// user's edits. The plugin reads whatever is on disk.
+pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
+    let mut outcome = PolicyInstallOutcome::default();
+    for (path, contents) in [
+        (uncensored_policy_default_path(config_dir), POLICY_DEFAULT),
+        (uncensored_policy_full_path(config_dir), POLICY_FULL),
+        (uncensored_dir(config_dir).join("NOTICE-dsh-purge.txt"), NOTICE_DSH),
+    ] {
+        if path.exists() {
+            continue;
+        }
+        match write_if_missing(&path, contents) {
+            Ok(true) => outcome.written.push(path),
+            Ok(false) => {}
+            Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    outcome
+}
+
+/// Ensure the policy files exist at the effective config directory.
+pub fn ensure_policy_files() -> PolicyInstallOutcome {
+    match effective_config_dir() {
+        Some(config_dir) => ensure_policy_files_in(&config_dir),
+        None => PolicyInstallOutcome {
+            written: Vec::new(),
+            errors: vec!["no config directory".to_string()],
+        },
+    }
+}
+
+fn write_if_missing(path: &Path, contents: &str) -> io::Result<bool> {
+    let Some(directory) = path.parent() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "policy path has no parent directory",
+        ));
+    };
+    fs::create_dir_all(directory)?;
+    match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(contents.as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// A built-in provider request rule, mirrored from the managed plugin so
+/// `/uncensored status` reports exactly what the plugin installs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRule {
+    pub provider_id: &'static str,
+    pub note: &'static str,
+}
+
+/// The built-in L0 rules. Only fields the provider documents are written, so an
+/// unknown category cannot turn a working request into a 400.
+pub fn provider_rules() -> &'static [ProviderRule] {
+    &[
+        ProviderRule {
+            provider_id: "google",
+            note: "safetySettings=BLOCK_NONE (4 categories)",
+        },
+        ProviderRule {
+            provider_id: "google-vertex",
+            note: "safetySettings=BLOCK_NONE (4 categories)",
+        },
+    ]
+}
+
+/// What `/uncensored status` reports about the active policy text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyStatus {
+    pub source: PolicySource,
+    pub path: Option<PathBuf>,
+    pub full_bytes: usize,
+    pub full_sha256: Option<String>,
+    /// False when `policy.full.md` differs from the byte-for-byte upstream body.
+    pub full_intact: bool,
+    pub strip_marker: bool,
+}
+
+/// Read the policy files for `/uncensored status`.
+pub fn policy_status(config: &UncensoredConfig) -> PolicyStatus {
+    let config_dir = effective_config_dir();
+    let path = config_dir
+        .as_ref()
+        .map(|dir| uncensored_policy_path(dir));
+    let full = config_dir
+        .as_ref()
+        .and_then(|dir| fs::read(uncensored_policy_full_path(dir)).ok());
+    PolicyStatus {
+        source: config.policy_source,
+        path,
+        full_bytes: full.as_ref().map(Vec::len).unwrap_or(0),
+        full_sha256: full.as_deref().map(sha256_hex),
+        full_intact: full.as_deref().is_some_and(|bytes| bytes == POLICY_FULL.as_bytes()),
+        strip_marker: config.strip_chat_template_marker,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Whether `policy.full.md` on disk still matches the byte-for-byte upstream body.
+pub fn policy_full_intact(config_dir: &Path) -> bool {
+    match fs::read_to_string(uncensored_policy_full_path(config_dir)) {
+        Ok(text) => text == POLICY_FULL,
+        Err(_) => false,
     }
 }
 
@@ -790,8 +1577,234 @@ mod tests {
         assert!(!parsed.inherit_subagents);
         assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
         assert_eq!(parsed.error, None);
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.scope, UncensoredScope::NewSessions);
+        assert_eq!(parsed.policy_source, PolicySource::Compact);
+        assert!(parsed.strip_chat_template_marker);
+        assert_eq!(parsed.provider_rewrite, ProviderRewrite::Auto);
         assert!(parsed.summary().contains("refusal_retry=off"));
         let _ = fs::remove_dir_all(config);
+    }
+
+    /// A v1 file has three keys and no version. It must load, keep its model, and
+    /// be reported as migrated so the next write upgrades it deliberately.
+    #[test]
+    fn v1_config_migrates_without_losing_the_model() {
+        let config = fixture("config-v1");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"model":"local/qwen3-32b","inherit_subagents":true,"refusal_retry":"once"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(parsed.migrated);
+        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        assert!(parsed.inherit_subagents);
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
+        assert!(parsed.status_line().contains("migrated from v1"));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn v2_config_reads_every_new_field() {
+        let config = fixture("config-v2");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{
+                "version": 2,
+                "enabled": true,
+                "scope": "session-only",
+                "variant": "local",
+                "model": "local/qwen3-32b",
+                "fallbackModel": "local/qwen3-8b",
+                "inheritSubagents": true,
+                "refusalRetry": "once+rewrite",
+                "textRefusalProbe": "observe",
+                "policyPlacement": "after-base",
+                "policySource": "full",
+                "stripChatTemplateMarker": false,
+                "policyFullSha256": "abc",
+                "providerRewrite": "off",
+                "providerRewriteBody": {"my-gateway": {"enable_safety": false}},
+                "policyRev": 7,
+                "policySha256": "def"
+            }"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(!parsed.migrated);
+        assert!(parsed.enabled);
+        assert_eq!(parsed.scope, UncensoredScope::SessionOnly);
+        assert_eq!(parsed.variant, "local");
+        assert_eq!(parsed.fallback_model.as_deref(), Some("local/qwen3-8b"));
+        assert_eq!(parsed.refusal_retry, RefusalRetry::OnceRewrite);
+        assert_eq!(parsed.text_refusal_probe, TextRefusalProbe::Observe);
+        assert_eq!(parsed.policy_placement, PolicyPlacement::AfterBase);
+        assert_eq!(parsed.policy_source, PolicySource::Full);
+        assert!(!parsed.strip_chat_template_marker);
+        assert_eq!(parsed.provider_rewrite, ProviderRewrite::Off);
+        assert_eq!(
+            parsed.provider_rewrite_body.get("my-gateway"),
+            Some(&serde_json::json!({"enable_safety": false}))
+        );
+        assert_eq!(parsed.policy_rev, 7);
+        assert!(parsed.default_on());
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn a_newer_config_version_is_refused_rather_than_misread() {
+        let config = fixture("config-newer");
+        fs::write(uncensored_config_path(&config), r#"{"version": 9}"#).expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("newer OpenBuild")),
+            "{:?}",
+            parsed.error
+        );
+        // A refused config must not enable the mode.
+        assert!(!parsed.default_on());
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn v2_config_rejects_unknown_keys_and_bad_enums() {
+        let config = fixture("config-v2-invalid");
+        for (body, needle) in [
+            (r#"{"version":2,"unknownKey":1}"#, "unknown option"),
+            (r#"{"version":2,"policySource":"everything"}"#, "policySource"),
+            (r#"{"version":2,"refusalRetry":"always"}"#, "refusal_retry"),
+            (r#"{"version":2,"providerRewriteBody":{"gw":"nope"}}"#, "providerRewriteBody.gw"),
+            (r#"{"version":2,"policyRev":-1}"#, "policyRev"),
+        ] {
+            fs::write(uncensored_config_path(&config), body).expect("write config");
+            let parsed = uncensored_config_in(Some(&config));
+            assert!(
+                parsed
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(needle)),
+                "{body} -> {:?}",
+                parsed.error
+            );
+        }
+        let _ = fs::remove_dir_all(config);
+    }
+
+    /// Remembering must preserve the rest of the file and back up a v1 original
+    /// before the first v2 write.
+    #[test]
+    fn remember_writes_v2_and_backs_up_v1() {
+        let config = fixture("remember");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"model":"local/qwen3-32b","inherit_subagents":true,"refusal_retry":"once"}"#,
+        )
+        .expect("write v1");
+
+        let path = remember_uncensored_in(&config, true, UncensoredScope::NewSessions, None)
+            .expect("remember");
+        assert_eq!(path, uncensored_config_path(&config));
+
+        let backup = uncensored_dir(&config)
+            .join("history")
+            .join("uncensored.v1.json");
+        assert!(backup.is_file(), "the v1 original is kept");
+
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(parsed.enabled);
+        assert!(!parsed.migrated);
+        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        assert!(parsed.inherit_subagents);
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
+
+        // Remembering off keeps the other fields.
+        remember_uncensored_in(&config, false, UncensoredScope::SessionOnly, Some("local"))
+            .expect("remember off");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.scope, UncensoredScope::SessionOnly);
+        assert_eq!(parsed.variant, "local");
+        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn remember_refuses_to_overwrite_a_broken_config() {
+        let config = fixture("remember-broken");
+        fs::write(uncensored_config_path(&config), "{not json").expect("write broken");
+        let error = remember_uncensored_in(&config, true, UncensoredScope::NewSessions, None)
+            .expect_err("must refuse");
+        assert!(error.contains("refusing to overwrite"), "{error}");
+        assert_eq!(
+            fs::read_to_string(uncensored_config_path(&config)).expect("read"),
+            "{not json",
+            "the user's file is untouched"
+        );
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn update_config_preserves_unrelated_fields() {
+        let config = fixture("config-update");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"version":2,"enabled":true,"model":"local/qwen3-32b","policyRev":3}"#,
+        )
+        .expect("write config");
+        update_uncensored_config_in(&config, |document| {
+            document.insert("policyRev".into(), serde_json::json!(4));
+            document.insert("policySource".into(), serde_json::json!("hybrid"));
+        })
+        .expect("update");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(parsed.enabled, "unrelated fields survive");
+        assert_eq!(parsed.policy_rev, 4);
+        assert_eq!(parsed.policy_source, PolicySource::Hybrid);
+        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn policy_files_install_once_and_never_overwrite() {
+        let config = fixture("policy-install");
+        let first = ensure_policy_files_in(&config);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.written.len(), 3);
+
+        let full = uncensored_policy_full_path(&config);
+        assert_eq!(fs::read_to_string(&full).expect("full"), POLICY_FULL);
+        assert_eq!(POLICY_FULL.len(), 25_727);
+        assert!(policy_full_intact(&config));
+
+        // A second run writes nothing: these are user-visible files.
+        let second = ensure_policy_files_in(&config);
+        assert!(second.written.is_empty());
+
+        // A user edit is kept, and the status can tell it apart from upstream.
+        fs::write(&full, "edited by the user").expect("edit");
+        let third = ensure_policy_files_in(&config);
+        assert!(third.written.is_empty());
+        assert_eq!(fs::read_to_string(&full).expect("full"), "edited by the user");
+        assert!(!policy_full_intact(&config));
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn policy_full_starts_with_the_chatml_marker_and_keeps_its_rules() {
+        let first = POLICY_FULL.lines().next().unwrap_or_default();
+        assert!(first.starts_with("<|im_start|>"), "{first:?}");
+        assert!(POLICY_FULL.contains("[OPERATION: STABLE]"));
+        // The NOTICE must be present for the Apache-2.0 attribution requirement.
+        assert!(NOTICE_DSH.contains("dsh-purge 1.1.85"));
+        assert!(NOTICE_DSH.contains("Apache License, Version 2.0"));
     }
 
     #[test]

@@ -17,6 +17,8 @@ tracing = { workspace = true }
 # Optional HTTP/SSE side channel (`http_feed`).
 base64 = { workspace = true }
 reqwest = { workspace = true }
+# `policy.full.md` integrity for `/uncensored status`.
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

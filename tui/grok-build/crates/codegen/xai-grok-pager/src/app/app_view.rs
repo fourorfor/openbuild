@@ -1037,6 +1037,9 @@ pub struct AppView {
     pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
+    /// `uncensored.json` said new sessions start in `uncensored`, cached once at
+    /// startup so `handle_session_created` never reads the file per session.
+    pub uncensored_default: bool,
     /// A `/pane open` waiting for the event loop to spawn its kernel.
     ///
     /// The loop owns the ACP receivers, so dispatch can only record intent; the
@@ -1687,6 +1690,8 @@ impl AppView {
             pending_gate_verification: None,
             gate_verify_gen: 0,
             reconnect_pending: false,
+            // Read once here: the config file must not be touched per session.
+            uncensored_default: openbuild_backend::plugin::uncensored_config().default_on(),
             pane_open_request: None,
             pane_close_request: None,
             diff_request: None,

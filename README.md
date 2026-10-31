@@ -12,7 +12,7 @@ openbuild-kernel.exe (Bun)
 OpenBuild core（会话、工具、权限、MCP、Skill、模型）
 ```
 
-OpenBuild 是一套独立的 agent 产品：内核（Bun，源自 opencode）与终端界面（Rust，源自 grok-build）都直接在本仓库内维护，不需要再打补丁。**M0–M5**（骨架、主链路、权限、会话/模型、压缩可见性、诊断）以及主题导入、`/kernel`、子智能体接管、ACP 服务端、HTTP 直连、**E2 双内核并排（`/pane`）**、H 无审查模式 v1.1 均已落地。
+OpenBuild 是一套独立的 agent 产品：内核（Bun，源自 opencode）与终端界面（Rust，源自 grok-build）都直接在本仓库内维护，不需要再打补丁。**M0–M5**（骨架、主链路、权限、会话/模型、压缩可见性、诊断）以及主题导入、`/kernel`、子智能体接管、ACP 服务端、HTTP 直连、**E2 双内核并排（`/pane`）**、H 无审查模式 **v2** 均已落地；`question` 工具改用 `x.ai/ask_user_question` 扩展通道，不再误报 "The user dismissed this question"。
 
 ## 当前状态
 
@@ -21,12 +21,12 @@ OpenBuild 是一套独立的 agent 产品：内核（Bun，源自 opencode）与
 - `openbuild-kernel.exe acp` 能响应 `initialize`，返回 `agentCapabilities`、9 个可用模型、3 个命令。
 - `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）；安装 H 插件后 mode 为 `build` / `plan` / `uncensored`。
 - Rust 侧子进程桥 `openbuild-backend` 能完成 `initialize → session/new` 往返。
-- `cargo test -p openbuild-backend --lib`：113 passed / 2 ignored（含子智能体、HTTP feed、H 插件安装器与 E2 的 profile 槽位/隔离目录）。
+- `cargo test -p openbuild-backend --lib`：141 passed / 2 ignored（含子智能体、HTTP feed、H 插件安装器与配置 schema v2、E2 的 profile 槽位/隔离目录）。
 - 真实双内核（ptyctl）：`/pane open secondary` 后两个内核进程并存、两 pane 并排、左右各自返回
   `FINAL-LEFT` / `FINAL-RIGHT`、`/backend` 按 pane 报 slot 0/1、secondary 拥有私有 `opencode.db`、
   杀掉 secondary 只影响该 pane。
 - H 插件 Bun 单测：8 pass；真实内核 `plugin check` 对 managed 插件返回 `openbuild.uncensored (current)`，对坏插件返回 `check failed` 且 exit 1。
-- `cargo check -p xai-grok-pager`：通过；`/uncensored` 相关 lib 单测 9 pass。
+- `cargo check -p xai-grok-pager`：通过；`/uncensored` 相关 lib 单测 20 pass。
 - `cargo build -p openbuild-server --release`：通过；`openbuild-server --version` → `openbuild-server 0.1.0`。
 - `bun run typecheck`（packages/cli）：通过（1,886 文件）。
 
@@ -375,8 +375,8 @@ NOTIFY {"_meta":{"eventId":"ses_...-1","promptId":"openbuild-handshake-29200","s
 PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 ```
 
-- `cargo test -p openbuild-backend`：71 passed（含 9 个 `adapter::child` 用例、HTTP feed 与 H 插件安装器/配置用例）。
-- `bun test openbuild/tests/uncensored-plugin.test.ts`：8 passed（H 策略追加、agent 注册、options/model、子智能体继承与配置错误）。
+- `cargo test -p openbuild-backend --lib`：141 passed / 2 ignored（含 `adapter::child`、HTTP feed、H 插件安装器与配置 schema v2 用例）。
+- `bun test tests/uncensored-plugin.test.ts`：28 passed（v1 迁移、v2 校验、变体解析、标记去重、策略热加载、provider 改写、`policySource` 三态与 events 观测）。
 - `cargo run -p openbuild-backend --example crash`：`PASS kernel exit detected (code: Some(1))` + `PASS a user stop stays a user stop`。
 - `cargo build -p openbuild-server --release`：Finished；`openbuild-server --version` → `openbuild-server 0.1.0`。
 - `cargo run -p openbuild-server --example relay -- <kernel> <cwd>`：`INITIALIZE agent=OpenCode` → `SESSION ses_...` → `PROMPT stopReason=EndTurn updates=3` → PASS。
@@ -414,34 +414,48 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
   品牌相关模块全部通过：`views::welcome` 105、`views::settings_modal` 190、
   `views::privacy_banner` 5、`branding` 2、`notifications::protocol` 14。
 
-## H 无审查模式（v1.1）
+## H 无审查模式（v2）
 
 默认关闭、按会话生效的内容策略模式。开启后 agent 不因内容本身拒绝、不说教、
 不附加免责声明；工具权限、沙箱与系统边界不变。
 
-- `/uncensored on|off|status`：切换本会话的 `uncensored` / `build` agent。
+- `/uncensored`（无参数）弹出选项菜单：`On` / `On + remember` / `Off` / `Off + remember` /
+  `Edit policy` / `Status` / `Cancel`。选带 remember 的项会写盘，之后新会话默认按该状态开启
+  （徽标带 `*` 表示"默认开启"）。
+- `/uncensored on|off|status` 快速路径仍然可用。
+- `/uncensored-edit` 打开策略文件，支持 `--list` / `--diff` / `--reset` / `--variant <id>` /
+  `--model <provider/model>` / `--use-full|--use-compact|--use-hybrid` / `--keep-marker` /
+  `--strip-marker` / `--provider-rewrite on|auto|off` / `--disable-probe`。
 - 状态行出现 `无审查` 徽标，与 `YOLO` / `计划` 并列；权限轴独立。
 - `stopReason=refusal` 显示为 `TurnRefused` 警告终态，提示 `/model` 换模型或改
-  provider 后重发，不再静默显示“完成”。
+  provider 后重发，不再静默显示"完成"。
 - 插件源码内嵌在 `openbuild-backend`，启动时写入内核实际读取的配置目录
   （`OPENCODE_CONFIG_DIR`、已有的 `~/.config/openbuild` 或 `~/.config/opencode`）
   的 `plugin/openbuild-uncensored.ts`；managed 副本自动升级，用户文件不覆盖。
 - `/kernel plugin check` 可查看本地插件是 `current` 还是 `check failed`。
-- v1.1 配置在同级 `uncensored.json`：`model`（`provider/model`）、
-  `inheritSubagents`（默认 false）、`refusal_retry`（`off` / `once`）。
-  解析错误会在 `/uncensored status` 显示；改配置后先 `/kernel restart`。
-- `refusal_retry=once` 只对 driver 的 refusal 自动续写一次；第二次拒绝只显示标记。
-  子智能体只在 `inheritSubagents=true` 且父会话是 `uncensored` 时继承策略。
+- 配置 `<config>/uncensored.json` 为 schema v2：`version` / `enabled` / `scope` / `variant` /
+  `model` / `fallbackModel` / `inheritSubagents` / `refusalRetry`（`off` / `once` / `once+rewrite`）/
+  `textRefusalProbe`（`off` / `observe` / `retry-once`）/ `policyPlacement` / `policySource`
+  （`compact` / `full` / `hybrid`）/ `stripChatTemplateMarker` / `policyFullSha256` /
+  `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody`。v1 三键文件自动迁移并备份。
+- 策略分层：`<config>/uncensored/policy.md`（用户）> 变体文件（追加，不替换）> 内置
+  `policy.default.md`；插件每轮按 mtime+size 检查，改文件**不重启内核**即生效。
+- L0 provider 请求改写走 `session.http.request` hook：内置 `google` / `google-vertex` 的
+  `safetySettings`，其余 provider 用 `providerRewriteBody` 浅合并；只处理 `kind === "primary"`，
+  解析失败原样放行。
+- L2.5 保留 dsh-purge 内置提示词正文为 `policy.full.md`（25,727 B，逐字节一致，默认不启用；
+  启用时默认剥离首行 ChatML 标记）。署名与 sha256 见 `plugin/NOTICE-dsh-purge.txt`。
 
-未做：`--uncensored` 启动旗标、文本级拒绝启发式、viewer/reconcile 自动重试。
-OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝。
+未做：`--uncensored` 启动旗标、viewer/reconcile 自动重试。
+OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝，
+`policy.full.md` 改变的是请求长什么样，不是服务端语义审核的判定结果。
 
 
 ## 路线图（未实现）
 
 以下功能仍是已知缺口：
 
-- **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v1.1 的其余项已完成。
+- **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v2 的其余项已完成。
 - **非 Windows 平台**：目前只在 Windows 上构建与验收；`build.ps1` / `install.ps1` 是 PowerShell 脚本。
 - **上游测试的 Windows 平台失败**：见上节「已知限制」，与本仓库改动无关。
 
