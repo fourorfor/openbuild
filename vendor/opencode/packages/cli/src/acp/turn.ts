@@ -380,6 +380,7 @@ export const make = Effect.fnUntraced(function* (input: {
     attached: Attached,
     current: ACPTranslate.TurnState,
     exit: Exit.Exit<ACPTranslate.Terminal, ACPError.Failure>,
+    promptId: string,
   ) {
     if (Exit.isFailure(exit) && !Cause.hasInterrupts(exit.cause)) return yield* Effect.failCause(exit.cause)
     const terminal = Exit.isSuccess(exit) ? exit.value : "interrupted"
@@ -387,7 +388,14 @@ export const make = Effect.fnUntraced(function* (input: {
     if (failure) return yield* failure
     yield* sendUsageUpdate(attached, current)
     const cancelledWhileSettling = Exit.isFailure(yield* Effect.exit(Effect.interruptible(Effect.void)))
-    return ACPTranslate.response(current, attached.id, cancelledWhileSettling ? "interrupted" : terminal)
+    const response = ACPTranslate.response(current, attached.id, cancelledWhileSettling ? "interrupted" : terminal)
+    // grok's TUI only accepts a PromptResponse for the turn it is rendering when
+    // `_meta.promptId` names that turn. A Send now interjection settles the
+    // replaced turn and the replacement turn with two responses on the same
+    // session, so without this echo the replaced turn's `cancelled` reply is
+    // adopted by the replacement: its updates stop being rendered live and the
+    // answer only shows up after the session is loaded again.
+    return { ...response, _meta: { ...response._meta, promptId, sessionId: attached.id } }
   })
 
   const sendUsageUpdate = Effect.fn("cli.acp.turn.usage")(
@@ -437,14 +445,15 @@ export const make = Effect.fnUntraced(function* (input: {
       (turn) => execute(attached, prompt, turn),
       (turn, exit) => handoff(attached, turn, exit),
     ).pipe(Effect.interruptible, Effect.exit)
-    return yield* settle(attached, yield* Ref.get(state), exit)
+    return yield* settle(attached, yield* Ref.get(state), exit, promptId)
   })
 
   return {
     prompt: Effect.fnUntraced(function* (params, signal) {
       // Send now replaces the running turn. Stop it (and let its wind-down
       // settle) before registering the new prompt, so the session never has
-      // two ACP prompts at once.
+      // two ACP prompts at once and the old interrupt cannot reach the prompt
+      // submitted after it.
       if (sendNowRequested(params) && FiberMap.hasUnsafe(turns, params.sessionId))
         yield* FiberMap.remove(turns, params.sessionId)
       // Synchronous and before setup, so concurrent prompts cannot both register and an early cancel still applies.

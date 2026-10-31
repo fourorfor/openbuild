@@ -107,7 +107,7 @@ describe("acp prompt turns over the wire", () => {
         cachedWriteTokens: 13,
         totalTokens: 171,
       },
-      _meta: {},
+      _meta: { promptId: submitted.id, sessionId: acp.sessionId },
     })
     expect(acp.server.submissions).toEqual([
       { kind: "prompt", sessionID, id: expect.stringMatching(/^msg_/), text: "hi", files: [], delivery: "steer" },
@@ -389,14 +389,20 @@ describe("acp prompt turns over the wire", () => {
     ])
     await acp.notify("session/cancel", { sessionId: acp.sessionId })
 
-    expect(await preparing).toEqual({ stopReason: "cancelled", _meta: {} })
+    expect(await preparing).toMatchObject({
+      stopReason: "cancelled",
+      _meta: expect.objectContaining({ sessionId: acp.sessionId }),
+    })
     expect(acp.server.submissions).toEqual([])
 
     const prompt = acp.prompt(acp.sessionId, "hello")
     await acp.until(() => acp.server.submissions.length === 1, "prompt submission")
     await acp.notify("session/cancel", { sessionId: acp.sessionId })
 
-    expect(await prompt).toEqual({ stopReason: "cancelled", _meta: {} })
+    expect(await prompt).toMatchObject({
+      stopReason: "cancelled",
+      _meta: expect.objectContaining({ sessionId: acp.sessionId }),
+    })
     await aborted.promise
     expect(acp.server.interrupts).toEqual([acp.sessionId])
   })
@@ -436,10 +442,10 @@ describe("acp prompt turns over the wire", () => {
     await admitted(acp, acp.sessionId)
     await acp.notify("session/cancel", { sessionId: acp.sessionId })
 
-    expect(await prompt).toEqual({
+    expect(await prompt).toMatchObject({
       stopReason: "cancelled",
       usage: { inputTokens: 30, outputTokens: 3, totalTokens: 33 },
-      _meta: {},
+      _meta: expect.objectContaining({ sessionId: acp.sessionId }),
     })
     const before = receivedBeforeResponse(acp)
     expect(before).toEqual(
@@ -474,7 +480,10 @@ describe("acp prompt turns over the wire", () => {
     await admitted(acp, acp.sessionId)
     await acp.notify("session/cancel", { sessionId: acp.sessionId })
 
-    expect(await prompt).toEqual({ stopReason: "cancelled", _meta: {} })
+    expect(await prompt).toMatchObject({
+      stopReason: "cancelled",
+      _meta: expect.objectContaining({ sessionId: acp.sessionId }),
+    })
     const compactionId = acp.server.prompts[0]?.id
     const before = receivedBeforeResponse(acp)
     expect(before).toContainEqual(
@@ -531,13 +540,45 @@ describe("acp prompt turns over the wire", () => {
     const replaced = await acp.request("session/prompt", {
       sessionId: acp.sessionId,
       prompt: [{ type: "text", text: "send now" }],
-      _meta: { sendNow: true },
+      _meta: { sendNow: true, promptId: "p-now" },
     })
 
-    expect(replaced).toMatchObject({ stopReason: "end_turn" })
-    expect(await running).toMatchObject({ stopReason: "cancelled" })
+    expect(replaced).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-now" } })
+    // The replaced turn answers its own request, tagged with its own prompt id, so the pager never adopts it as the
+    // interjection: doing so would stop rendering the new turn until the session was loaded again.
+    expect(await running).toMatchObject({
+      stopReason: "cancelled",
+      _meta: expect.objectContaining({ sessionId: acp.sessionId }),
+    })
+    expect((await running)._meta?.promptId).not.toBe("p-now")
     expect(acp.server.interrupts).toEqual([acp.sessionId])
     expect(acp.server.prompts.map((submission) => submission.text)).toEqual(["hold", "send now"])
+  })
+
+  test("send now does not wait for a replaced turn that is slow to wind down", async () => {
+    // The replaced turn keeps running until the kernel interrupts it; the interjection must still be answered.
+    await using acp = await startSession({
+      ...held,
+      cancelDrainTimeout: "30 seconds",
+      onPrompt: ({ sessionID, id, text }) =>
+        text === "hold"
+          ? [delivered(sessionID, id), textDelta(sessionID, "msg_held", "working")]
+          : turn(sessionID, id),
+    })
+
+    const running = acp.prompt(acp.sessionId, "hold")
+    await admitted(acp, acp.sessionId)
+
+    const startedAt = Date.now()
+    const replaced = await acp.request("session/prompt", {
+      sessionId: acp.sessionId,
+      prompt: [{ type: "text", text: "send now" }],
+      _meta: { sendNow: true, promptId: "p-fast" },
+    })
+    expect(Date.now() - startedAt).toBeLessThan(10_000)
+
+    expect(replaced).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-fast" } })
+    expect(await running).toMatchObject({ stopReason: "cancelled" })
   })
 
   test("a concurrent prompt without send now still fails", async () => {
