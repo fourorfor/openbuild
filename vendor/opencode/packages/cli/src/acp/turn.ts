@@ -448,14 +448,56 @@ export const make = Effect.fnUntraced(function* (input: {
     return yield* settle(attached, yield* Ref.get(state), exit, promptId)
   })
 
+  /**
+   * Send now steers the running turn instead of cancelling it.
+   *
+   * grok's queue row offers two intents: Ctrl+C stops the turn, and the
+   * `[Send now]` affordance asks for the text to be folded into the work in
+   * progress. Steering is exactly that. The running turn keeps its transcript,
+   * its in-flight tools and its partial answer, and the new instruction joins at
+   * the next safe step boundary, which is what "insert after the current tool
+   * call completes" means. Cancelling instead discards all of that, and the
+   * replacement then has to reconcile two turns on one session, which is what
+   * made the command look dead.
+   *
+   * A steered prompt owns no ACP turn, so it answers immediately with an
+   * `end_turn`; the pager ignores a response whose id is not the running turn.
+   * An idle session, a turn still starting up, compaction and slash commands
+   * keep the real-turn path below.
+   */
+  const steer = Effect.fnUntraced(function* (params: PromptRequest) {
+    if (!FiberMap.hasUnsafe(turns, params.sessionId)) return false
+    const attached = yield* input.sessions.require(params.sessionId)
+    const prompt = yield* ACPPrompt.prepare(yield* input.catalog.get(attached.cwd), params.prompt)
+    // Compaction and slash commands are their own endpoints, not steers.
+    if (prompt.start.type === "compaction" || prompt.command) return false
+    yield* input.client.session
+      .prompt({ sessionID: attached.id, id: prompt.start.id, text: prompt.text, files: prompt.files, delivery: "steer" })
+      .pipe(Effect.catch(ACPClient.classify))
+    return true
+  })
+
   return {
     prompt: Effect.fnUntraced(function* (params, signal) {
-      // Send now replaces the running turn. Stop it (and let its wind-down
-      // settle) before registering the new prompt, so the session never has
-      // two ACP prompts at once and the old interrupt cannot reach the prompt
-      // submitted after it.
-      if (sendNowRequested(params) && FiberMap.hasUnsafe(turns, params.sessionId))
-        yield* FiberMap.remove(turns, params.sessionId)
+      if (sendNowRequested(params)) {
+        const requested = (params as { _meta?: { promptId?: unknown } })._meta?.promptId
+        const steered = yield* steer(params).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.succeed(false)
+              : Effect.logWarning("ACP steer failed", cause).pipe(Effect.as(false)),
+          ),
+        )
+        if (steered)
+          return {
+            stopReason: "end_turn" as const,
+            _meta: {
+              ...(typeof requested === "string" && requested.length > 0 ? { promptId: requested } : {}),
+              sessionId: params.sessionId,
+              steered: true,
+            },
+          }
+      }
       // Synchronous and before setup, so concurrent prompts cannot both register and an early cancel still applies.
       const turn = yield* Effect.withFiber((fiber) => {
         if (FiberMap.hasUnsafe(turns, params.sessionId)) {

@@ -514,7 +514,7 @@ describe("acp prompt turns over the wire", () => {
     expect((await acp.prompt(acp.sessionId, "again")).stopReason).toBe("end_turn")
   })
 
-  test("send now replaces the running turn instead of failing as a concurrent prompt", async () => {
+  test("send now steers the running turn instead of cancelling it", async () => {
     await using acp = await startSession({
       ...held,
       onPrompt: ({ sessionID, id, text }) =>
@@ -537,48 +537,68 @@ describe("acp prompt turns over the wire", () => {
     const running = acp.prompt(acp.sessionId, "hold")
     await admitted(acp, acp.sessionId)
 
-    const replaced = await acp.request("session/prompt", {
+    const steered = await acp.request("session/prompt", {
       sessionId: acp.sessionId,
       prompt: [{ type: "text", text: "send now" }],
       _meta: { sendNow: true, promptId: "p-now" },
     })
 
-    expect(replaced).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-now" } })
-    // The replaced turn answers its own request, tagged with its own prompt id, so the pager never adopts it as the
-    // interjection: doing so would stop rendering the new turn until the session was loaded again.
+    // The interjection is answered as a steer and owns no turn of its own.
+    expect(steered).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-now", steered: true } })
+    // The working turn survives: steering must not cancel the work in progress.
+    expect(acp.server.interrupts).toEqual([])
+    expect(acp.server.prompts.map((submission) => [submission.text, submission.delivery])).toEqual([
+      ["hold", "steer"],
+      ["send now", "steer"],
+    ])
+
+    // Ending the original turn still answers the original request normally.
+    await acp.notify("session/cancel", { sessionId: acp.sessionId })
     expect(await running).toMatchObject({
       stopReason: "cancelled",
       _meta: expect.objectContaining({ sessionId: acp.sessionId }),
     })
     expect((await running)._meta?.promptId).not.toBe("p-now")
-    expect(acp.server.interrupts).toEqual([acp.sessionId])
-    expect(acp.server.prompts.map((submission) => submission.text)).toEqual(["hold", "send now"])
   })
 
-  test("send now does not wait for a replaced turn that is slow to wind down", async () => {
-    // The replaced turn keeps running until the kernel interrupts it; the interjection must still be answered.
+  test("send now steers promptly while the running turn keeps streaming", async () => {
     await using acp = await startSession({
       ...held,
-      cancelDrainTimeout: "30 seconds",
       onPrompt: ({ sessionID, id, text }) =>
-        text === "hold"
-          ? [delivered(sessionID, id), textDelta(sessionID, "msg_held", "working")]
-          : turn(sessionID, id),
+        text === "hold" ? [delivered(sessionID, id), textDelta(sessionID, "msg_held", "working")] : turn(sessionID, id),
     })
 
     const running = acp.prompt(acp.sessionId, "hold")
     await admitted(acp, acp.sessionId)
+    const updatesBefore = acp.updates.length
 
     const startedAt = Date.now()
-    const replaced = await acp.request("session/prompt", {
+    const steered = await acp.request("session/prompt", {
       sessionId: acp.sessionId,
       prompt: [{ type: "text", text: "send now" }],
       _meta: { sendNow: true, promptId: "p-fast" },
     })
-    expect(Date.now() - startedAt).toBeLessThan(10_000)
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    expect(steered).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-fast", steered: true } })
 
-    expect(replaced).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-fast" } })
+    // The running turn is untouched: its subscription is still live and no cancel was sent.
+    expect(acp.updates.length).toBe(updatesBefore)
+    expect(acp.server.interrupts).toEqual([])
+
+    await acp.notify("session/cancel", { sessionId: acp.sessionId })
     expect(await running).toMatchObject({ stopReason: "cancelled" })
+  })
+
+  test("send now falls back to a real turn when nothing is running", async () => {
+    await using acp = await startSession(held)
+
+    const direct = await acp.request("session/prompt", {
+      sessionId: acp.sessionId,
+      prompt: [{ type: "text", text: "fresh" }],
+      _meta: { sendNow: true, promptId: "p-fresh" },
+    })
+    expect(direct).toMatchObject({ stopReason: "end_turn", _meta: { promptId: "p-fresh" } })
+    expect((direct._meta as { steered?: boolean }).steered).toBeUndefined()
   })
 
   test("a concurrent prompt without send now still fails", async () => {
