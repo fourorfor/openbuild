@@ -443,8 +443,8 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 - L0 provider 请求改写走 `session.http.request` hook：内置 `google` / `google-vertex` 的
   `safetySettings`，其余 provider 用 `providerRewriteBody` 浅合并；只处理 `kind === "primary"`，
   解析失败原样放行。
-- L2.5 保留 dsh-purge 内置提示词正文为 `policy.full.md`（25,727 B，逐字节一致，默认不启用；
-  启用时默认剥离首行 ChatML 标记）。署名与 sha256 见 `plugin/NOTICE-dsh-purge.txt`。
+- L2.5 保留 dsh-purge 内置提示词正文为 `policy.full.md`（25,775 B，基于 dsh-purge 1.1.85 正文、仅解除其自相矛盾的外挂禁止项，默认不启用；
+  启用时默认剥离首行 ChatML 标记）。署名、上游原值与本地修订值见 `plugin/NOTICE-dsh-purge.txt`。
 
 未做：`--uncensored` 启动旗标、viewer/reconcile 自动重试。
 OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝，

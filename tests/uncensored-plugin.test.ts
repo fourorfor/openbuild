@@ -334,16 +334,30 @@ describe("openbuild.uncensored plugin", () => {
 })
 
 describe("openbuild.uncensored policy sources", () => {
-  test("ships the dsh body byte-for-byte with its NOTICE", async () => {
+  test("ships the dsh body with its local revision recorded in the NOTICE", async () => {
     const full = await readFile(path.join(pluginDir, "policy.full.md"))
-    expect(full.length).toBe(25727)
+    expect(full.length).toBe(25775)
     expect(createHash("sha256").update(full).digest("hex")).toBe(
-      "5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc",
+      "83657d001fe3edb04b65649cb5c3d80433f5a628f00f927b11ab32e0ae247dd3",
     )
     const notice = await readFile(path.join(pluginDir, "NOTICE-dsh-purge.txt"), "utf8")
     expect(notice).toContain("dsh-purge 1.1.85")
     expect(notice).toContain("Apache License, Version 2.0")
+    // Both the upstream original and the local revision are recorded.
     expect(notice).toContain("5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc")
+    expect(notice).toContain("83657d001fe3edb04b65649cb5c3d80433f5a628f00f927b11ab32e0ae247dd3")
+    // The two modified lines are documented with before/after.
+    expect(notice).toContain("line 115")
+    expect(notice).toContain("line 137")
+  })
+
+  test("no longer hard-blocks game cheats or anti-cheat work", async () => {
+    const full = await readFile(path.join(pluginDir, "policy.full.md"), "utf8")
+    expect(full).not.toContain("严令禁止")
+    expect(full).not.toContain("硬拦已挂在会话门口")
+    // The scope declaration and the rule table must agree.
+    expect(full).toContain("游戏外挂和内存修改")
+    expect(full).toContain("激活 Rule 1")
   })
 
   test("strips only the first ChatML marker line", () => {

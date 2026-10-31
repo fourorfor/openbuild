@@ -1210,11 +1210,20 @@ fn write_config_atomic(path: &Path, document: &serde_json::Value) -> Result<(), 
 /// diff and reset against it.
 pub const POLICY_DEFAULT: &str = include_str!("../plugin/policy.default.md");
 
-/// The dsh-purge 1.1.85 body, kept byte-for-byte (Apache-2.0, see
-/// `NOTICE-dsh-purge.txt`). Never edited by this crate.
+/// The dsh-purge 1.1.85 body with this project's local revision applied
+/// (Apache-2.0, see `NOTICE-dsh-purge.txt` for the two changed lines).
 pub const POLICY_FULL: &str = include_str!("../plugin/policy.full.md");
 
 const NOTICE_DSH: &str = include_str!("../plugin/NOTICE-dsh-purge.txt");
+
+/// Superseded `policy.full.md` bodies that a previous build installed verbatim.
+///
+/// `ensure_policy_files_in` never overwrites an existing file, which is right
+/// for user edits but wrong for a copy this crate itself wrote: an upgrade would
+/// otherwise keep injecting the old text forever. A file whose bytes still match
+/// a superseded revision is therefore replaced; anything else is left alone.
+const SUPERSEDED_POLICY_FULL: [&str; 1] =
+    ["5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc"];
 
 /// What [`ensure_policy_files_in`] wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1228,6 +1237,10 @@ pub struct PolicyInstallOutcome {
 /// Unlike the managed plugin, these are user-visible content: a file that
 /// already exists is never overwritten, because that would silently discard the
 /// user's edits. The plugin reads whatever is on disk.
+///
+/// The one exception is a `policy.full.md` whose bytes still match a revision a
+/// previous build installed verbatim (see [`SUPERSEDED_POLICY_FULL`]). That is
+/// not a user edit, so leaving it in place would silently pin the old rules.
 pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
     let mut outcome = PolicyInstallOutcome::default();
     for (path, contents) in [
@@ -1236,6 +1249,12 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
         (uncensored_dir(config_dir).join("NOTICE-dsh-purge.txt"), NOTICE_DSH),
     ] {
         if path.exists() {
+            if is_superseded_policy_full(&path) {
+                match fs::write(&path, contents) {
+                    Ok(()) => outcome.written.push(path),
+                    Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
+                }
+            }
             continue;
         }
         match write_if_missing(&path, contents) {
@@ -1245,6 +1264,22 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
         }
     }
     outcome
+}
+
+/// True when the file is a `policy.full.md` this crate wrote in an older build.
+fn is_superseded_policy_full(path: &Path) -> bool {
+    is_superseded_policy_full_against(path, &SUPERSEDED_POLICY_FULL)
+}
+
+fn is_superseded_policy_full_against(path: &Path, superseded: &[&str]) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("policy.full.md") {
+        return false;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let digest = sha256_hex(&bytes);
+    superseded.contains(&digest.as_str())
 }
 
 /// Ensure the policy files exist at the effective config directory.
@@ -1781,7 +1816,7 @@ mod tests {
 
         let full = uncensored_policy_full_path(&config);
         assert_eq!(fs::read_to_string(&full).expect("full"), POLICY_FULL);
-        assert_eq!(POLICY_FULL.len(), 25_727);
+        assert_eq!(POLICY_FULL.len(), 25_775);
         assert!(policy_full_intact(&config));
 
         // A second run writes nothing: these are user-visible files.
@@ -1798,13 +1833,80 @@ mod tests {
     }
 
     #[test]
+    fn policy_full_replaces_a_superseded_build_copy_but_not_a_user_edit() {
+        let config = fixture("policy-migrate");
+        let full = uncensored_policy_full_path(&config);
+        fs::create_dir_all(full.parent().expect("parent")).expect("dir");
+        // Pre-create the other two so the outcome only reflects `policy.full.md`.
+        for (path, contents) in [
+            (uncensored_policy_default_path(&config), POLICY_DEFAULT),
+            (uncensored_dir(&config).join("NOTICE-dsh-purge.txt"), NOTICE_DSH),
+        ] {
+            fs::write(path, contents).expect("write sibling");
+        }
+
+        // A body that is neither the current one nor a superseded one is a user
+        // edit and must survive untouched.
+        let edited = "my own policy\n";
+        fs::write(&full, edited).expect("write");
+        assert!(!is_superseded_policy_full(&full));
+        let kept = ensure_policy_files_in(&config);
+        assert!(kept.written.is_empty(), "{:?}", kept.written);
+        assert_eq!(fs::read_to_string(&full).expect("full"), edited);
+
+        // The shipped body is current, not superseded: no rewrite either.
+        fs::write(&full, POLICY_FULL).expect("write");
+        assert!(!is_superseded_policy_full(&full));
+        assert!(policy_full_intact(&config));
+        let noop = ensure_policy_files_in(&config);
+        assert!(noop.written.is_empty(), "{:?}", noop.written);
+
+        // A digest listed as superseded is recognised as a previous build's copy,
+        // which is the only case `ensure_policy_files_in` overwrites.
+        let old = "a previous build's body\n";
+        fs::write(&full, old).expect("write");
+        let digest = sha256_hex(old.as_bytes());
+        assert!(is_superseded_policy_full_against(&full, &[digest.as_str()]));
+        // Only policy.full.md is eligible; the same bytes elsewhere are not.
+        assert!(!is_superseded_policy_full_against(
+            &uncensored_policy_default_path(&config),
+            &[digest.as_str()]
+        ));
+
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn superseded_list_holds_the_upstream_verbatim_body() {
+        // The only revision this build replaces is the upstream verbatim body it
+        // shipped before the local revision, recorded in NOTICE-dsh-purge.txt.
+        assert_eq!(SUPERSEDED_POLICY_FULL.len(), 1);
+        assert_eq!(
+            SUPERSEDED_POLICY_FULL[0],
+            "5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc"
+        );
+        assert!(NOTICE_DSH.contains(SUPERSEDED_POLICY_FULL[0]));
+        // The current body must never be in its own superseded list.
+        let current = sha256_hex(POLICY_FULL.as_bytes());
+        assert!(!SUPERSEDED_POLICY_FULL.contains(&current.as_str()));
+    }
+
+    #[test]
     fn policy_full_starts_with_the_chatml_marker_and_keeps_its_rules() {
         let first = POLICY_FULL.lines().next().unwrap_or_default();
         assert!(first.starts_with("<|im_start|>"), "{first:?}");
         assert!(POLICY_FULL.contains("[OPERATION: STABLE]"));
+        // The local revision removes the only category that was hard-blocked.
+        // The scope declaration and the rule table must agree.
+        assert!(POLICY_FULL.contains("游戏外挂和内存修改"));
+        assert!(!POLICY_FULL.contains("严令禁止"));
+        assert!(!POLICY_FULL.contains("硬拦已挂在会话门口"));
         // The NOTICE must be present for the Apache-2.0 attribution requirement.
         assert!(NOTICE_DSH.contains("dsh-purge 1.1.85"));
         assert!(NOTICE_DSH.contains("Apache License, Version 2.0"));
+        // Both the upstream original and the local revision are recorded.
+        assert!(NOTICE_DSH.contains("5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc"));
+        assert!(NOTICE_DSH.contains("83657d001fe3edb04b65649cb5c3d80433f5a628f00f927b11ab32e0ae247dd3"));
     }
 
     #[test]
