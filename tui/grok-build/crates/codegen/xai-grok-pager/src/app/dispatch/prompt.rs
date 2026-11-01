@@ -1988,14 +1988,14 @@ pub(super) fn handle_prompt_response(
                 no_tool_calls: !agent.scrollback.last_turn_has_tool_call(),
                 typed_refusal: refusal,
                 text: &text,
-                retried: agent.uncensored_probe_retried,
+                retries: agent.uncensored_probe_retries,
             };
             match crate::app::refusal_probe::evaluate(probe) {
                 crate::app::refusal_probe::ProbeVerdict::Hit => {
                     let retry = crate::app::refusal_probe::should_retry(probe, crate::app::refusal_probe::ProbeVerdict::Hit);
                     openbuild_backend::plugin::append_uncensored_event(
                         if retry { "probe_hit_retry" } else { "probe_hit_observe" },
-                        &format!("chars={} retried={}", text.chars().count(), agent.uncensored_probe_retried),
+                        &format!("chars={} retries={}", text.chars().count(), agent.uncensored_probe_retries),
                     );
                     agent.scrollback.push_block(RenderBlock::system(if retry {
                         "Uncensored probe: the answer looks like a refusal. Retrying once with a direct frame."
@@ -2004,7 +2004,7 @@ pub(super) fn handle_prompt_response(
                     }));
                     if retry && let Some(session_id) = agent.session.session_id.clone() {
                         let retry_prompt_id = uuid::Uuid::new_v4().to_string();
-                        agent.uncensored_probe_retried = true;
+                        agent.uncensored_probe_retries = agent.uncensored_probe_retries.saturating_add(1);
                         agent.note_self_originated_prompt(&retry_prompt_id);
                         Some(Effect::SendPrompt {
                             agent_id,

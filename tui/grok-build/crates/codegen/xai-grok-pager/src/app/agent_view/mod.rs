@@ -1303,8 +1303,9 @@ pub struct AgentView {
     /// Cleared when that retry turn ends, so a second refusal cannot loop.
     pub(crate) uncensored_retry_pending: bool,
     /// A text-level refusal probe retry was already sent in this session.
-    /// The probe is a heuristic, so it may fire only once per session.
-    pub(crate) uncensored_probe_retried: bool,
+    /// The probe is a heuristic, so its retries are counted and capped by
+    /// `refusalRetryBudget` rather than fired on every turn.
+    pub(crate) uncensored_probe_retries: u32,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.

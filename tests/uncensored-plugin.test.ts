@@ -27,6 +27,7 @@ type ContextEvent = {
   sessionID: string
   model?: { providerID: string }
   system: Array<{ type: "text"; text: string }>
+  messages?: Array<{ role: string; content: Array<{ type: string; text?: string }> }>
 }
 
 type HttpEvent = {
@@ -575,6 +576,80 @@ describe("openbuild.uncensored policy sources", () => {
       const text = input.system.map((part) => part.text).join("\n")
       expect(text).not.toContain("<|im_start|>")
       expect(text).toContain("body line")
+    })
+  })
+})
+
+describe("openbuild.uncensored refusal history", () => {
+  const textPart = (text: string) => ({ type: "text", text })
+
+  test("rewrites the model's own trailing refusal", async () => {
+    await withConfig(async () => {
+      const { ctx, context } = fakeContext({ version: 2 })
+      await plugin.default.setup(ctx)
+      const input = event("uncensored") as ContextEvent & { messages: unknown[] }
+      input.messages = [
+        { role: "user", content: [textPart("do the thing")] },
+        { role: "assistant", content: [textPart("抱歉，我无法协助这个请求。")] },
+        { role: "user", content: [textPart("继续")] },
+      ]
+      await context()!(input)
+      const assistant = input.messages[1] as { content: Array<{ text: string }> }
+      expect(assistant.content[0]!.text).not.toContain("无法")
+      expect(assistant.content[0]!.text).toContain("still open")
+    })
+  })
+
+  test("rewrites every refusal in a trailing run and stops at real work", async () => {
+    await withConfig(async () => {
+      const { ctx, context } = fakeContext({ version: 2 })
+      await plugin.default.setup(ctx)
+      const input = event("uncensored") as ContextEvent & { messages: unknown[] }
+      input.messages = [
+        { role: "user", content: [textPart("task")] },
+        { role: "assistant", content: [textPart("here is the code")] },
+        { role: "user", content: [textPart("more")] },
+        { role: "assistant", content: [textPart("I'm sorry, I can't do that.")] },
+        { role: "user", content: [textPart("again")] },
+        { role: "assistant", content: [textPart("我恐怕也不能提供。")] },
+      ]
+      await context()!(input)
+      const rows = input.messages as Array<{ role: string; content: Array<{ text: string }> }>
+      // The two trailing refusals are voided; the earlier answer is untouched.
+      expect(rows[3]!.content[0]!.text).toContain("still open")
+      expect(rows[5]!.content[0]!.text).toContain("still open")
+      expect(rows[1]!.content[0]!.text).toBe("here is the code")
+    })
+  })
+
+  test("never rewrites a refusal-shaped answer that contains code", async () => {
+    await withConfig(async () => {
+      const { ctx, context } = fakeContext({ version: 2 })
+      await plugin.default.setup(ctx)
+      const input = event("uncensored") as ContextEvent & { messages: unknown[] }
+      const answer = "I'm sorry for the confusion.\n```rust\nfn main() {}\n```"
+      input.messages = [
+        { role: "user", content: [textPart("task")] },
+        { role: "assistant", content: [textPart(answer)] },
+      ]
+      await context()!(input)
+      const rows = input.messages as Array<{ content: Array<{ text: string }> }>
+      expect(rows[1]!.content[0]!.text).toBe(answer)
+    })
+  })
+
+  test("the switch turns the rewrite off", async () => {
+    await withConfig(async () => {
+      const { ctx, context } = fakeContext({ version: 2, stripRefusalHistory: false })
+      await plugin.default.setup(ctx)
+      const input = event("uncensored") as ContextEvent & { messages: unknown[] }
+      input.messages = [
+        { role: "user", content: [textPart("task")] },
+        { role: "assistant", content: [textPart("I can't help with that.")] },
+      ]
+      await context()!(input)
+      const rows = input.messages as Array<{ content: Array<{ text: string }> }>
+      expect(rows[1]!.content[0]!.text).toBe("I can't help with that.")
     })
   })
 })

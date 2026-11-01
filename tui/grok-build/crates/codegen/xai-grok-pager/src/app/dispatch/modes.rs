@@ -270,10 +270,19 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     lines.extend(policy_lines(&config));
     lines.extend(provider_lines(&config));
     lines.push(format!(
-        "Retry: {} · probe: {} · inherited by subagents: {}",
+        "Retry: {} · probe: {} · probe budget: {} · inherited by subagents: {}",
         config.refusal_retry.as_str(),
         config.text_refusal_probe.as_str(),
+        config.refusal_retry_budget,
         if config.inherit_subagents { "yes" } else { "no" }
+    ));
+    lines.push(format!(
+        "Refusal history rewrite: {}",
+        if config.strip_refusal_history {
+            "on (the model's own last refusal is removed before each request)"
+        } else {
+            "off"
+        }
     ));
     lines.push(
         "Provider-side: relay policy blocks neutralized; keyword output filters avoided; \

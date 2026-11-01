@@ -381,7 +381,7 @@ impl AgentView {
             uncensored_mode_active: false,
             uncensored_mode_pending: None,
             uncensored_retry_pending: false,
-            uncensored_probe_retried: false,
+            uncensored_probe_retries: 0,
             available_modes: Vec::new(),
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,

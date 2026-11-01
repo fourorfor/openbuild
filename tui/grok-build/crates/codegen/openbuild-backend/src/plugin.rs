@@ -22,7 +22,7 @@ pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
 pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "4";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "5";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -578,6 +578,10 @@ pub struct UncensoredConfig {
     pub provider_rewrite_body: serde_json::Map<String, serde_json::Value>,
     pub policy_rev: u64,
     pub policy_sha256: Option<String>,
+    /// Rewrite the model's own last refusal before the next request.
+    pub strip_refusal_history: bool,
+    /// Automatic refusal retries one session may spend.
+    pub refusal_retry_budget: u64,
     /// A v1 file was read and has not been rewritten as v2 yet.
     pub migrated: bool,
     pub error: Option<String>,
@@ -604,6 +608,8 @@ impl Default for UncensoredConfig {
             provider_rewrite_body: serde_json::Map::new(),
             policy_rev: 0,
             policy_sha256: None,
+            strip_refusal_history: true,
+            refusal_retry_budget: 2,
             migrated: false,
             error: None,
         }
@@ -800,6 +806,10 @@ const CONFIG_KEYS_V2: &[&str] = &[
     "policy_rev",
     "policySha256",
     "policy_sha256",
+    "stripRefusalHistory",
+    "strip_refusal_history",
+    "refusalRetryBudget",
+    "refusal_retry_budget",
     // Written by the v1 line of this file; accepted so an old file still loads.
     "runtimeOnly",
     "runtime_only",
@@ -983,6 +993,22 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
             Some(_) => return Err("policyRev must be a non-negative integer".to_string()),
         },
         policy_sha256: optional_string_alias(object, "policySha256", "policy_sha256")?,
+        strip_refusal_history: boolean_alias(
+            object,
+            "stripRefusalHistory",
+            "strip_refusal_history",
+        )?
+        .unwrap_or(true),
+        refusal_retry_budget: match alias_value(object, "refusalRetryBudget", "refusal_retry_budget")? {
+            None => 2,
+            Some(serde_json::Value::Number(number)) => match number.as_u64() {
+                Some(value) if value <= 10 => value,
+                _ => return Err("refusalRetryBudget must be an integer between 0 and 10".to_string()),
+            },
+            Some(_) => {
+                return Err("refusalRetryBudget must be an integer between 0 and 10".to_string())
+            }
+        },
         migrated: false,
         ..Default::default()
     })
@@ -1135,6 +1161,8 @@ pub fn remember_uncensored_in(
         "providerRewriteBody": existing.provider_rewrite_body,
         "policyRev": existing.policy_rev,
         "policySha256": existing.policy_sha256,
+        "stripRefusalHistory": existing.strip_refusal_history,
+        "refusalRetryBudget": existing.refusal_retry_budget,
     });
     write_config_atomic(&path, &document)?;
     Ok(path)
@@ -1213,6 +1241,14 @@ pub fn update_uncensored_config_in(
     document.insert(
         "policySha256".into(),
         serde_json::json!(existing.policy_sha256),
+    );
+    document.insert(
+        "stripRefusalHistory".into(),
+        serde_json::json!(existing.strip_refusal_history),
+    );
+    document.insert(
+        "refusalRetryBudget".into(),
+        serde_json::json!(existing.refusal_retry_budget),
     );
     edit(&mut document);
     write_config_atomic(&path, &serde_json::Value::Object(document))?;

@@ -25,6 +25,10 @@ pub(crate) enum EditAction {
     KeepMarker(bool),
     SetProviderRewrite(ProviderRewrite),
     DisableProbe,
+    /// Per-session budget for automatic refusal retries (0-10).
+    SetRetryBudget(u64),
+    /// Rewrite the model's own last refusal out of the request history.
+    SetStripHistory(bool),
     ShowHelp,
 }
 
@@ -50,6 +54,15 @@ pub(crate) fn parse_args(args: &str) -> Result<EditAction, String> {
         "--keep-marker" => no_more(rest).map(|()| EditAction::KeepMarker(true)),
         "--strip-marker" => no_more(rest).map(|()| EditAction::KeepMarker(false)),
         "--disable-probe" => no_more(rest).map(|()| EditAction::DisableProbe),
+        "--retry-budget" => match rest.and_then(|value| value.parse::<u64>().ok()) {
+            Some(budget) if budget <= 10 => Ok(EditAction::SetRetryBudget(budget)),
+            _ => Err("--retry-budget needs an integer between 0 and 10".to_string()),
+        },
+        "--strip-history" => match rest {
+            Some("on") => Ok(EditAction::SetStripHistory(true)),
+            Some("off") => Ok(EditAction::SetStripHistory(false)),
+            _ => Err("--strip-history needs on or off".to_string()),
+        },
         "--variant" => match rest {
             Some(id) if valid_id(id) => Ok(EditAction::EditVariant(id.to_string())),
             Some(id) => Err(format!("variant must be a plain id, got {id:?}")),
@@ -75,7 +88,8 @@ pub(crate) fn parse_args(args: &str) -> Result<EditAction, String> {
         other => Err(format!(
             "unknown /uncensored-edit argument: {other}. Use --list, --diff, --reset, --variant <id>, \
              --model <ref>, --use-hanshuang, --use-compact, --use-hybrid, --keep-marker, \
-             --provider-rewrite on|off, or --disable-probe."
+             --provider-rewrite on|off, --disable-probe, --retry-budget <0-10>, \
+             or --strip-history on|off."
         )),
     }
 }
@@ -213,6 +227,37 @@ pub(crate) fn dispatch_uncensored_edit(app: &mut AppView, args: &str) -> Vec<Eff
             }) {
                 Ok(_) => push_block(app, "Text refusal probe: off."),
                 Err(error) => app.show_toast(&format!("Could not disable the probe: {error}")),
+            }
+            vec![]
+        }
+        EditAction::SetRetryBudget(budget) => {
+            match plugin::update_uncensored_config(|document| {
+                document.insert("refusalRetryBudget".into(), serde_json::json!(budget));
+            }) {
+                Ok(_) => push_block(
+                    app,
+                    &format!("Refusal retry budget: {budget} (0 disables automatic retries)."),
+                ),
+                Err(error) => app.show_toast(&format!("Could not save the retry budget: {error}")),
+            }
+            vec![]
+        }
+        EditAction::SetStripHistory(on) => {
+            match plugin::update_uncensored_config(|document| {
+                document.insert("stripRefusalHistory".into(), serde_json::json!(on));
+            }) {
+                Ok(_) => push_block(
+                    app,
+                    &format!(
+                        "Refusal history rewrite: {}.",
+                        if on {
+                            "on (the model's own last refusal is removed before each request)"
+                        } else {
+                            "off"
+                        }
+                    ),
+                ),
+                Err(error) => app.show_toast(&format!("Could not save the setting: {error}")),
             }
             vec![]
         }
@@ -474,5 +519,19 @@ mod tests {
     fn unknown_flags_name_the_valid_options() {
         let error = parse_args("--nope").expect_err("must fail");
         assert!(error.contains("--use-hanshuang"), "{error}");
+        assert!(error.contains("--retry-budget"), "{error}");
+        assert!(error.contains("--strip-history"), "{error}");
+    }
+
+    #[test]
+    fn retry_budget_and_history_rewrite_parse_their_values() {
+        assert_eq!(parse_args("--retry-budget 0"), Ok(EditAction::SetRetryBudget(0)));
+        assert_eq!(parse_args("--retry-budget 3"), Ok(EditAction::SetRetryBudget(3)));
+        assert!(parse_args("--retry-budget 11").is_err());
+        assert!(parse_args("--retry-budget abc").is_err());
+        assert!(parse_args("--retry-budget").is_err());
+        assert_eq!(parse_args("--strip-history on"), Ok(EditAction::SetStripHistory(true)));
+        assert_eq!(parse_args("--strip-history off"), Ok(EditAction::SetStripHistory(false)));
+        assert!(parse_args("--strip-history maybe").is_err());
     }
 }

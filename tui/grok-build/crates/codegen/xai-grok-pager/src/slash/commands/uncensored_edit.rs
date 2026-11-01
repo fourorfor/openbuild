@@ -14,7 +14,7 @@ impl SlashCommand for UncensoredEditCommand {
     slash_meta! {
         name: "uncensored-edit",
         description: "Edit the uncensored policy, variant, and provider switches",
-        usage: "/uncensored-edit [--list|--diff|--reset|--variant <id>|--model <ref>|--use-hanshuang|--use-compact|--use-hybrid|--keep-marker|--provider-rewrite on|off|--disable-probe]",
+        usage: "/uncensored-edit [--list|--diff|--reset|--variant <id>|--model <ref>|--use-hanshuang|--use-compact|--use-hybrid|--keep-marker|--provider-rewrite on|off|--disable-probe|--retry-budget <n>|--strip-history on|off]",
         takes_args: true,
         args_required: false,
         session_scoped: true,
@@ -48,6 +48,8 @@ impl SlashCommand for UncensoredEditCommand {
             item("--keep-marker", "Keep the first ChatML marker line"),
             item("--provider-rewrite", "Turn the request rewrite on or off"),
             item("--disable-probe", "Turn the text refusal probe off"),
+            item("--retry-budget 2", "Automatic refusal retries per session (0-10)"),
+            item("--strip-history on", "Rewrite the model's own last refusal out of the request"),
         ])
     }
 
@@ -119,5 +121,7 @@ mod tests {
             .expect("suggestions");
         assert!(items.iter().any(|item| item.insert_text == "--use-hanshuang"));
         assert!(items.iter().any(|item| item.insert_text == "--provider-rewrite"));
+        assert!(items.iter().any(|item| item.insert_text == "--retry-budget 2"));
+        assert!(items.iter().any(|item| item.insert_text == "--strip-history on"));
     }
 }

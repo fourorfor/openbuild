@@ -2802,6 +2802,8 @@ fn uncensored_status_reports_mode_and_plugin() {
     assert!(text.contains("may still refuse"), "{text}");
     assert!(text.contains("Policy:"), "{text}");
     assert!(text.contains("Retry:"), "{text}");
+    assert!(text.contains("probe budget:"), "{text}");
+    assert!(text.contains("Refusal history rewrite: on"), "{text}");
 }
 
 /// The menu must be a real modal, not just a printed block: the acceptance

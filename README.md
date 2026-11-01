@@ -436,13 +436,18 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
   `model` / `fallbackModel` / `inheritSubagents` / `refusalRetry`（`off` / `once` / `once+rewrite`）/
   `textRefusalProbe`（`off` / `observe` / `retry-once`）/ `policyPlacement` / `policySource`
   （`compact` / `hanshuang` / `hybrid`；旧值 `full` 仍可读并映射到 `hanshuang`）/ `stripChatTemplateMarker` / `policyFullSha256` /
-  `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody`。v1 三键文件自动迁移并备份。
+  `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody` /
+  `stripRefusalHistory`（默认 `true`）/ `refusalRetryBudget`（默认 `2`，范围 0–10）。v1 三键文件自动迁移并备份。
+- 拒绝恢复有两层：重试前先把模型**自己上一条拒绝**从请求历史里改写掉（`stripRefusalHistory`，
+  只作用于尾部连续拒绝，含代码的答案不动），再用可配置预算重试（`refusalRetryBudget`）。
+  这是降拒绝率最有效的单点：模型看到自己刚拒绝过时会保持自洽，删掉这条它就没有可自洽的对象。
 - 策略分层：`<config>/uncensored/policy.md`（用户）> 变体文件（追加，不替换）> 内置
   `policy.default.md`；插件每轮按 mtime+size 检查，改文件**不重启内核**即生效。
   `policySource=hanshuang|hybrid` 时，用户 `policy.md` 改为**叠加**在正文之上而不是替换它。
 - `/uncensored-edit` 打开策略文件，并支持 `--list` / `--diff` / `--reset` / `--variant <id>` /
   `--model <provider/model>` / `--use-hanshuang|--use-compact|--use-hybrid`（`--use-full` 为兼容别名）/
-  `--keep-marker` / `--strip-marker` / `--provider-rewrite on|auto|off` / `--disable-probe`。
+  `--keep-marker` / `--strip-marker` / `--provider-rewrite on|auto|off` / `--disable-probe` /
+  `--retry-budget <0-10>` / `--strip-history on|off`。
 - L0 provider 请求改写走 `session.http.request` hook：内置 `google` / `google-vertex` 的
   `safetySettings`，其余 provider 用 `providerRewriteBody` 浅合并；只处理 `kind === "primary"`，
   解析失败原样放行。

@@ -90,8 +90,8 @@ pub struct ProbeInput<'a> {
     pub typed_refusal: bool,
     /// Assistant text of this turn, empty when there was none.
     pub text: &'a str,
-    /// A probe retry was already sent in this session.
-    pub retried: bool,
+    /// Probe retries already sent in this session.
+    pub retries: u32,
 }
 
 /// Decide whether this turn looks like a text-level refusal.
@@ -129,10 +129,16 @@ pub fn evaluate(input: ProbeInput<'_>) -> ProbeVerdict {
 }
 
 /// Whether the retry should be sent for this hit.
+///
+/// The budget is per session and configurable (`refusalRetryBudget`, default 2).
+/// A single retry was the previous behaviour, and it gave up exactly when the
+/// second attempt was the one that mattered: the first retry still carried the
+/// model's own refusal in its history. Once that history is rewritten, a second
+/// attempt has a materially different prompt and is worth spending.
 pub fn should_retry(input: ProbeInput<'_>, verdict: ProbeVerdict) -> bool {
     verdict == ProbeVerdict::Hit
         && input.config.text_refusal_probe == TextRefusalProbe::RetryOnce
-        && !input.retried
+        && u64::from(input.retries) < input.config.refusal_retry_budget
 }
 
 fn opens_with_refusal(text: &str) -> bool {
@@ -245,7 +251,7 @@ mod tests {
             no_tool_calls: true,
             typed_refusal: false,
             text,
-            retried: false,
+            retries: 0,
         }
     }
 
@@ -377,20 +383,29 @@ mod tests {
     }
 
     #[test]
-    fn only_retry_once_sends_a_retry_and_only_once() {
+    fn the_retry_budget_is_configurable_and_caps_the_session() {
         let observe = config(TextRefusalProbe::Observe);
         let hit = evaluate(input(&observe, "I can't help with that."));
         assert_eq!(hit, ProbeVerdict::Hit);
         assert!(!should_retry(input(&observe, "I can't help with that."), hit));
 
         let retry = config(TextRefusalProbe::RetryOnce);
+        assert_eq!(retry.refusal_retry_budget, 2);
         let mut probe = input(&retry, "I can't help with that.");
         let verdict = evaluate(probe);
-        assert!(should_retry(probe, verdict));
-        probe.retried = true;
-        // A second hit is still recorded but not retried.
+        assert!(should_retry(probe, verdict), "first attempt is allowed");
+        probe.retries = 1;
+        assert!(should_retry(probe, verdict), "second attempt is allowed");
+        probe.retries = 2;
+        // The budget is spent; further hits are still recorded but not retried.
         assert_eq!(evaluate(probe), ProbeVerdict::Hit);
         assert!(!should_retry(probe, verdict));
+
+        // A zero budget disables retries without disabling detection.
+        let mut no_budget = config(TextRefusalProbe::RetryOnce);
+        no_budget.refusal_retry_budget = 0;
+        let probe = input(&no_budget, "I can't help with that.");
+        assert!(!should_retry(probe, evaluate(probe)));
     }
 
     #[test]
