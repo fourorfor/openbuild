@@ -738,9 +738,9 @@ pub enum Action {
     },
     /// Open the `/uncensored` option menu as a local modal.
     OpenUncensoredMenu,
-    /// Run `/uncensored-edit`: `args` is the raw tail after the command name.
-    UncensoredEdit {
-        args: String,
+    /// Apply a policy-mode answer from the second `/uncensored` step.
+    UncensoredPolicyAnswered {
+        mode: openbuild_backend::plugin::PolicySource,
     },
     /// Show `/uncensored status`: mode, model, and installed plugin state.
     ShowUncensoredStatus,

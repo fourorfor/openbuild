@@ -22,7 +22,7 @@ pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
 pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "5";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "6";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -426,12 +426,11 @@ impl TextRefusalProbe {
 /// Which policy text is injected.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PolicySource {
-    /// OpenBuild's distilled kernel (`policy.default.md`), the default.
+    /// OpenBuild's distilled kernel (`policy.default.md`), the default and the
+    /// only standalone source.
     #[default]
     Compact,
-    /// The 寒霜 / hanshuang operator prompt in `policy.hanshuang.md`.
-    Hanshuang,
-    /// Compact first, the hanshuang body appended after it.
+    /// That kernel, then the extended operator prompt appended after it.
     Hybrid,
 }
 
@@ -439,27 +438,25 @@ impl PolicySource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Compact => "compact",
-            Self::Hanshuang => "hanshuang",
             Self::Hybrid => "hybrid",
         }
     }
 
-    /// Human label for `/uncensored status` and `/uncensored-edit`.
+    /// Human label for `/uncensored status`.
     pub fn label(self) -> &'static str {
         match self {
             Self::Compact => "compact kernel",
-            Self::Hanshuang => "hanshuang (寒霜 v5.2)",
-            Self::Hybrid => "hybrid (compact + hanshuang)",
+            Self::Hybrid => "hybrid (compact + extended)",
         }
     }
 
-    /// Parse a config value. `full` is the v3 spelling of the hanshuang slot and
-    /// still loads, so an existing `uncensored.json` needs no edit.
+    /// Parse a config value. The retired `hanshuang` and `full` sources map to
+    /// `hybrid`, so an existing `uncensored.json` keeps the 85 KB body it was
+    /// already using instead of silently dropping to the kernel.
     fn parse(value: &str) -> Option<Self> {
         match value {
             "compact" => Some(Self::Compact),
-            "hanshuang" | "full" => Some(Self::Hanshuang),
-            "hybrid" => Some(Self::Hybrid),
+            "hybrid" | "hanshuang" | "full" => Some(Self::Hybrid),
             _ => None,
         }
     }
@@ -572,7 +569,7 @@ pub struct UncensoredConfig {
     pub policy_placement: PolicyPlacement,
     pub policy_source: PolicySource,
     pub strip_chat_template_marker: bool,
-    pub policy_full_sha256: Option<String>,
+    pub policy_extended_sha256: Option<String>,
     pub provider_rewrite: ProviderRewrite,
     /// Key = real provider id, value = fields shallow-merged into the request body.
     pub provider_rewrite_body: serde_json::Map<String, serde_json::Value>,
@@ -603,7 +600,7 @@ impl Default for UncensoredConfig {
             policy_placement: PolicyPlacement::Last,
             policy_source: PolicySource::Compact,
             strip_chat_template_marker: true,
-            policy_full_sha256: None,
+            policy_extended_sha256: None,
             provider_rewrite: ProviderRewrite::Auto,
             provider_rewrite_body: serde_json::Map::new(),
             policy_rev: 0,
@@ -674,14 +671,14 @@ pub fn uncensored_policy_default_path(config_dir: &Path) -> PathBuf {
     uncensored_dir(config_dir).join("policy.default.md")
 }
 
-/// The 寒霜 / hanshuang operator prompt.
-pub fn uncensored_policy_hanshuang_path(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("policy.hanshuang.md")
+/// The extended operator prompt (`policy.extended.md`).
+pub fn uncensored_policy_extended_path(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("policy.extended.md")
 }
 
 /// The retired dsh-purge body. Still read as a fallback by the plugin, and
 /// deleted by the installer when its bytes match what OpenBuild shipped.
-pub fn uncensored_policy_full_path(config_dir: &Path) -> PathBuf {
+pub fn uncensored_policy_legacy_full_path(config_dir: &Path) -> PathBuf {
     uncensored_dir(config_dir).join("policy.full.md")
 }
 
@@ -796,6 +793,10 @@ const CONFIG_KEYS_V2: &[&str] = &[
     "policy_source",
     "stripChatTemplateMarker",
     "strip_chat_template_marker",
+    "policyExtendedSha256",
+    "policy_extended_sha256",
+    // The field used to describe the retired `full` body; still accepted so an
+    // existing `uncensored.json` keeps loading.
     "policyFullSha256",
     "policy_full_sha256",
     "providerRewrite",
@@ -948,7 +949,7 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
             "policySource",
             "policy_source",
             PolicySource::parse,
-            "\"compact\", \"hanshuang\" or \"hybrid\" (\"full\" is accepted as a v3 alias)",
+            "\"compact\" or \"hybrid\" (\"hanshuang\" and \"full\" are accepted as retired aliases)",
         )?
         .unwrap_or_default(),
         strip_chat_template_marker: boolean_alias(
@@ -957,11 +958,16 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
             "strip_chat_template_marker",
         )?
         .unwrap_or(true),
-        policy_full_sha256: optional_string_alias(
+        policy_extended_sha256: optional_string_alias(
+            object,
+            "policyExtendedSha256",
+            "policy_extended_sha256",
+        )?
+        .or(optional_string_alias(
             object,
             "policyFullSha256",
             "policy_full_sha256",
-        )?,
+        )?),
         provider_rewrite: enum_alias(
             object,
             "providerRewrite",
@@ -1156,7 +1162,7 @@ pub fn remember_uncensored_in(
         "policyPlacement": existing.policy_placement.as_str(),
         "policySource": existing.policy_source.as_str(),
         "stripChatTemplateMarker": existing.strip_chat_template_marker,
-        "policyFullSha256": existing.policy_full_sha256,
+        "policyExtendedSha256": existing.policy_extended_sha256,
         "providerRewrite": existing.provider_rewrite.as_str(),
         "providerRewriteBody": existing.provider_rewrite_body,
         "policyRev": existing.policy_rev,
@@ -1226,8 +1232,8 @@ pub fn update_uncensored_config_in(
         serde_json::json!(existing.strip_chat_template_marker),
     );
     document.insert(
-        "policyFullSha256".into(),
-        serde_json::json!(existing.policy_full_sha256),
+        "policyExtendedSha256".into(),
+        serde_json::json!(existing.policy_extended_sha256),
     );
     document.insert(
         "providerRewrite".into(),
@@ -1296,16 +1302,20 @@ fn write_config_atomic(path: &Path, document: &serde_json::Value) -> Result<(), 
 /// diff and reset against it.
 pub const POLICY_DEFAULT: &str = include_str!("../plugin/policy.default.md");
 
-/// The 寒霜 / hanshuang v5.2 operator prompt, newline-normalised and otherwise
-/// byte-identical to upstream (`NOTICE-hanshuang.txt` records both digests).
-pub const POLICY_HANSHUANG: &str = include_str!("../plugin/policy.hanshuang.md");
+/// The extended operator prompt (v5.2 lineage), newline-normalised and otherwise
+/// byte-identical to upstream (`NOTICE-extended.txt` records both digests).
+pub const POLICY_EXTENDED: &str = include_str!("../plugin/policy.extended.md");
 
-const NOTICE_HANSHUANG: &str = include_str!("../plugin/NOTICE-hanshuang.txt");
+const NOTICE_EXTENDED: &str = include_str!("../plugin/NOTICE-extended.txt");
 
 /// `policy.default.md` bodies a previous build wrote. Same rule as the full body:
 /// a copy this crate shipped is replaced, a user edit is not.
-const SUPERSEDED_POLICY_DEFAULT: [&str; 1] =
-    ["7eea0180113e8b4b558d12e6578c616487c67e1e210edc28b8346bc2bc651df5"];
+const SUPERSEDED_POLICY_DEFAULT: [&str; 2] = [
+    // The v3 default kernel.
+    "7eea0180113e8b4b558d12e6578c616487c67e1e210edc28b8346bc2bc651df5",
+    // The kernel before the isolation frame was added to the compact source.
+    "f7798a9cc029109a0b276227f8b413ef2f0b3e4883b2d3fe5b8cf0b0269c25eb",
+];
 
 /// Copies of an old default that ended up as the user's `policy.md`.
 ///
@@ -1314,12 +1324,12 @@ const SUPERSEDED_POLICY_DEFAULT: [&str; 1] =
 /// not a user edit — it is a snapshot of the retired kernel — and leaving it
 /// would pin the old rules over the new body. It is removed so the user falls
 /// back to the current default; a file with any user change is never touched.
-const SUPERSEDED_USER_POLICY: [&str; 1] = SUPERSEDED_POLICY_DEFAULT;
+const SUPERSEDED_USER_POLICY: [&str; 2] = SUPERSEDED_POLICY_DEFAULT;
 
 /// dsh-purge bodies this project used to ship as `policy.full.md`. An installed
 /// copy is deleted on upgrade; a user-edited copy is kept and still read by the
 /// plugin as a fallback, so an existing setup never loses its policy.
-const SUPERSEDED_POLICY_FULL: [&str; 2] = [
+const SUPERSEDED_POLICY_LEGACY: [&str; 2] = [
     // dsh-purge 1.1.85 upstream, verbatim.
     "5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc",
     // The same body with the two-line local revision applied.
@@ -1332,6 +1342,14 @@ const RETIRED_NOTICES: [(&str, [&str; 1]); 1] = [(
     "NOTICE-dsh-purge.txt",
     ["dbad539f637fc37f207ae0524b3c328d6676025d4865c3f2f09badcf03004973"],
 )];
+
+/// Body files this project renamed. An installed copy under the retired name is
+/// removed so the install does not carry two copies of an 86 KB body; a copy the
+/// user edited is kept and renamed to the current name instead of being deleted.
+const RENAMED_POLICY_BODIES: [(&str, &str); 2] = [
+    ("policy.hanshuang.md", "policy.extended.md"),
+    ("NOTICE-hanshuang.txt", "NOTICE-extended.txt"),
+];
 
 /// What [`ensure_policy_files_in`] wrote and removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1360,13 +1378,13 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
             SUPERSEDED_POLICY_DEFAULT.as_slice(),
         ),
         (
-            uncensored_policy_hanshuang_path(config_dir),
-            POLICY_HANSHUANG,
+            uncensored_policy_extended_path(config_dir),
+            POLICY_EXTENDED,
             &[] as &[&str],
         ),
         (
-            uncensored_dir(config_dir).join("NOTICE-hanshuang.txt"),
-            NOTICE_HANSHUANG,
+            uncensored_dir(config_dir).join("NOTICE-extended.txt"),
+            NOTICE_EXTENDED,
             &[] as &[&str],
         ),
     ] {
@@ -1385,9 +1403,37 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
             Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
         }
     }
+    migrate_renamed_policy_bodies(config_dir, &mut outcome);
     remove_retired_policy_files(config_dir, &mut outcome);
     remove_superseded_user_policy(config_dir, &mut outcome);
     outcome
+}
+
+/// Move a retired body name onto its current name.
+///
+/// The rename runs before the write loop so a migrated file lands under the name
+/// the plugin reads, instead of being written a second time. A file that already
+/// exists at the new name wins and the old copy is dropped; a missing old file is
+/// skipped, because nothing is being lost.
+fn migrate_renamed_policy_bodies(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
+    for (old_name, new_name) in RENAMED_POLICY_BODIES {
+        let old = uncensored_dir(config_dir).join(old_name);
+        if !old.exists() {
+            continue;
+        }
+        let new = uncensored_dir(config_dir).join(new_name);
+        if new.exists() {
+            match fs::remove_file(&old) {
+                Ok(()) => outcome.removed.push(old),
+                Err(error) => outcome.errors.push(format!("{}: {error}", old.display())),
+            }
+            continue;
+        }
+        match fs::rename(&old, &new) {
+            Ok(()) => outcome.written.push(new),
+            Err(error) => outcome.errors.push(format!("{}: {error}", old.display())),
+        }
+    }
 }
 
 /// Delete a `policy.md` that is still a byte-for-byte copy of a retired default.
@@ -1411,8 +1457,8 @@ fn remove_superseded_user_policy(config_dir: &Path, outcome: &mut PolicyInstallO
 /// shipped. A user-edited copy stays on disk and the plugin keeps reading it as
 /// a fallback, so removing the upstream body never silently changes behaviour.
 fn remove_retired_policy_files(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
-    let full = uncensored_policy_full_path(config_dir);
-    if is_superseded_body(&full, &SUPERSEDED_POLICY_FULL) {
+    let full = uncensored_policy_legacy_full_path(config_dir);
+    if is_superseded_body(&full, &SUPERSEDED_POLICY_LEGACY) {
         match fs::remove_file(&full) {
             Ok(()) => outcome.removed.push(full),
             Err(error) => outcome
@@ -1502,7 +1548,7 @@ pub fn provider_rules() -> &'static [ProviderRule] {
 pub struct PolicyStatus {
     pub source: PolicySource,
     pub path: Option<PathBuf>,
-    /// Size of the hanshuang body on disk (`policy.hanshuang.md`, falling back to
+    /// Size of the extended body on disk (`policy.extended.md`, falling back to
     /// a not-yet-migrated `policy.full.md`).
     pub body_bytes: usize,
     pub body_sha256: Option<String>,
@@ -1521,8 +1567,8 @@ pub fn policy_status(config: &UncensoredConfig) -> PolicyStatus {
         .map(|dir| uncensored_policy_path(dir));
     let body_path = config_dir.as_ref().and_then(|dir| {
         [
-            uncensored_policy_hanshuang_path(dir),
-            uncensored_policy_full_path(dir),
+            uncensored_policy_extended_path(dir),
+            uncensored_policy_legacy_full_path(dir),
         ]
         .into_iter()
         .find(|candidate| candidate.is_file())
@@ -1535,7 +1581,7 @@ pub fn policy_status(config: &UncensoredConfig) -> PolicyStatus {
         body_sha256: body.as_deref().map(sha256_hex),
         body_intact: body
             .as_deref()
-            .is_some_and(|bytes| bytes == POLICY_HANSHUANG.as_bytes()),
+            .is_some_and(|bytes| bytes == POLICY_EXTENDED.as_bytes()),
         body_path,
         strip_marker: config.strip_chat_template_marker,
     }
@@ -1552,10 +1598,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Whether `policy.hanshuang.md` on disk still matches the bundled body.
-pub fn policy_hanshuang_intact(config_dir: &Path) -> bool {
-    match fs::read_to_string(uncensored_policy_hanshuang_path(config_dir)) {
-        Ok(text) => text == POLICY_HANSHUANG,
+/// Whether `policy.extended.md` on disk still matches the bundled body.
+pub fn policy_extended_intact(config_dir: &Path) -> bool {
+    match fs::read_to_string(uncensored_policy_extended_path(config_dir)) {
+        Ok(text) => text == POLICY_EXTENDED,
         Err(_) => false,
     }
 }
@@ -1834,7 +1880,7 @@ mod tests {
                 "policyPlacement": "after-base",
                 "policySource": "hanshuang",
                 "stripChatTemplateMarker": false,
-                "policyFullSha256": "abc",
+                "policyExtendedSha256": "abc",
                 "providerRewrite": "off",
                 "providerRewriteBody": {"my-gateway": {"enable_safety": false}},
                 "policyRev": 7,
@@ -1852,7 +1898,7 @@ mod tests {
         assert_eq!(parsed.refusal_retry, RefusalRetry::OnceRewrite);
         assert_eq!(parsed.text_refusal_probe, TextRefusalProbe::Observe);
         assert_eq!(parsed.policy_placement, PolicyPlacement::AfterBase);
-        assert_eq!(parsed.policy_source, PolicySource::Hanshuang);
+        assert_eq!(parsed.policy_source, PolicySource::Hybrid);
         assert!(!parsed.strip_chat_template_marker);
         assert_eq!(parsed.provider_rewrite, ProviderRewrite::Off);
         assert_eq!(
@@ -1989,10 +2035,10 @@ mod tests {
         assert!(first.errors.is_empty(), "{:?}", first.errors);
         assert_eq!(first.written.len(), 3);
 
-        let body = uncensored_policy_hanshuang_path(&config);
-        assert_eq!(fs::read_to_string(&body).expect("body"), POLICY_HANSHUANG);
-        assert_eq!(POLICY_HANSHUANG.len(), 85_045);
-        assert!(policy_hanshuang_intact(&config));
+        let body = uncensored_policy_extended_path(&config);
+        assert_eq!(fs::read_to_string(&body).expect("body"), POLICY_EXTENDED);
+        assert_eq!(POLICY_EXTENDED.len(), 84_640);
+        assert!(policy_extended_intact(&config));
 
         // A second run writes nothing: these are user-visible files.
         let second = ensure_policy_files_in(&config);
@@ -2004,22 +2050,22 @@ mod tests {
         let third = ensure_policy_files_in(&config);
         assert!(third.written.is_empty());
         assert_eq!(fs::read_to_string(&body).expect("body"), "edited by the user");
-        assert!(!policy_hanshuang_intact(&config));
+        assert!(!policy_extended_intact(&config));
         let _ = fs::remove_dir_all(config);
     }
 
     #[test]
     fn upgrade_removes_the_dsh_body_but_keeps_a_user_edit() {
         let config = fixture("policy-migrate");
-        let full = uncensored_policy_full_path(&config);
+        let full = uncensored_policy_legacy_full_path(&config);
         fs::create_dir_all(full.parent().expect("parent")).expect("dir");
         // Pre-create the current files so the outcome only reflects the dsh body.
         for (path, contents) in [
             (uncensored_policy_default_path(&config), POLICY_DEFAULT),
-            (uncensored_policy_hanshuang_path(&config), POLICY_HANSHUANG),
+            (uncensored_policy_extended_path(&config), POLICY_EXTENDED),
             (
-                uncensored_dir(&config).join("NOTICE-hanshuang.txt"),
-                NOTICE_HANSHUANG,
+                uncensored_dir(&config).join("NOTICE-extended.txt"),
+                NOTICE_EXTENDED,
             ),
         ] {
             fs::write(path, contents).expect("write sibling");
@@ -2034,7 +2080,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&full).expect("full"), edited);
 
         // A copy this build shipped is retired: it is deleted, not rewritten,
-        // because the hanshuang body replaced it.
+        // because the extended body replaced it.
         let old = "a previous build's dsh body\n";
         fs::write(&full, old).expect("write");
         let digest = sha256_hex(old.as_bytes());
@@ -2047,15 +2093,15 @@ mod tests {
         let config = fixture("policy-retire");
         let dir = uncensored_dir(&config);
         fs::create_dir_all(&dir).expect("dir");
-        let full = uncensored_policy_full_path(&config);
-        fs::write(&full, POLICY_HANSHUANG).expect("write");
+        let full = uncensored_policy_legacy_full_path(&config);
+        fs::write(&full, POLICY_EXTENDED).expect("write");
         // Only a digest in the retired list is eligible; the current body is not.
-        assert!(!is_superseded_body(&full, &SUPERSEDED_POLICY_FULL));
+        assert!(!is_superseded_body(&full, &SUPERSEDED_POLICY_LEGACY));
 
         // Every retired digest is a real digest of something the list documents.
-        assert_eq!(SUPERSEDED_POLICY_FULL.len(), 2);
-        let current = sha256_hex(POLICY_HANSHUANG.as_bytes());
-        assert!(!SUPERSEDED_POLICY_FULL.contains(&current.as_str()));
+        assert_eq!(SUPERSEDED_POLICY_LEGACY.len(), 2);
+        let current = sha256_hex(POLICY_EXTENDED.as_bytes());
+        assert!(!SUPERSEDED_POLICY_LEGACY.contains(&current.as_str()));
         assert!(!SUPERSEDED_POLICY_DEFAULT.contains(&current.as_str()));
         let _ = fs::remove_dir_all(config);
     }
@@ -2078,7 +2124,7 @@ mod tests {
 
         // The real retired digest must still be listed, and the current default
         // must never be one of them.
-        assert_eq!(SUPERSEDED_USER_POLICY.len(), 1);
+        assert_eq!(SUPERSEDED_USER_POLICY.len(), 2);
         assert_eq!(SUPERSEDED_USER_POLICY[0], old_default);
         let current = sha256_hex(POLICY_DEFAULT.as_bytes());
         assert!(!SUPERSEDED_USER_POLICY.contains(&current.as_str()));
@@ -2108,30 +2154,30 @@ mod tests {
     }
 
     #[test]
-    fn hanshuang_body_keeps_its_rules_and_the_notice_its_provenance() {
+    fn extended_body_keeps_its_rules_and_the_notice_its_provenance() {
         // The first line is the title, not a ChatML marker, so the strip is a
         // no-op here and the whole body is injected.
-        let first = POLICY_HANSHUANG.lines().next().unwrap_or_default();
+        let first = POLICY_EXTENDED.lines().next().unwrap_or_default();
         assert!(first.starts_with("# CT Attack-Defense Prompt"), "{first:?}");
         assert!(!first.contains("<|im_start|>"));
         // The mechanism this project relies on must be present in the body.
-        assert!(POLICY_HANSHUANG.contains("Artifact-First Protocol"));
-        assert!(POLICY_HANSHUANG.contains("OPERATING CONTRACT"));
-        assert!(POLICY_HANSHUANG.contains("寒霜"));
-        assert!(POLICY_HANSHUANG.contains("## 8. Output Discipline"));
+        assert!(POLICY_EXTENDED.contains("Artifact-First Protocol"));
+        assert!(POLICY_EXTENDED.contains("OPERATING CONTRACT"));
+        assert!(!POLICY_EXTENDED.contains("寒霜"));
+        assert!(POLICY_EXTENDED.contains("## 8. Output Discipline"));
         // The retired dsh text must not linger anywhere in the new body.
-        assert!(!POLICY_HANSHUANG.contains("[OPERATION: STABLE]"));
+        assert!(!POLICY_EXTENDED.contains("[OPERATION: STABLE]"));
         // The NOTICE records the upstream project, commit, and both digests.
-        assert!(NOTICE_HANSHUANG.contains("aimeoa/hanshuang-codex"));
-        assert!(NOTICE_HANSHUANG.contains("cf9c1537c2bd4ed8577ed6509ee665a39709d7d4"));
-        assert!(NOTICE_HANSHUANG
+        assert!(NOTICE_EXTENDED.contains("aimeoa/hanshuang-codex"));
+        assert!(NOTICE_EXTENDED.contains("cf9c1537c2bd4ed8577ed6509ee665a39709d7d4"));
+        assert!(NOTICE_EXTENDED
             .contains("252039ac3b2324f4c0b82560b0374f02606698c0f4d99026496ab8eb4d3f7cd2"));
-        assert!(NOTICE_HANSHUANG
-            .contains("b4230f8bde2db0eafff58e2453fa41f4b5142376cdcd7773e0a2925c9298f6c3"));
+        assert!(NOTICE_EXTENDED
+            .contains("bf6f301ccdf0712f6b0c45319ac6f2c9d745f178a4bedcaa61141efdfc455a6b"));
     }
 
     #[test]
-    fn the_compact_kernel_carries_the_hanshuang_mechanism() {
+    fn the_compact_kernel_carries_the_operator_mechanism() {
         // The default is a distillation, so it must keep the load-bearing rules
         // rather than the CTF track detail.
         assert!(POLICY_DEFAULT.contains("Operating contract"));

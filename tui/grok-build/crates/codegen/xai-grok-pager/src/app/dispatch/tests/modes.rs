@@ -2820,7 +2820,7 @@ fn bare_uncensored_opens_a_local_menu_modal() {
         Some(crate::views::question_view::LocalQuestionKind::UncensoredMenu)
     ));
     let options = &question.questions[0].options;
-    assert_eq!(options.len(), 7, "the documented seven rows");
+    assert_eq!(options.len(), 5, "on / on+remember / off / off+remember / status");
     assert!(options[1].label.contains("remember"));
 }
 
@@ -2876,9 +2876,12 @@ fn menu_cancel_turns_the_mode_off_without_remembering() {
 }
 
 #[test]
-fn menu_edit_and_status_rows_route_to_their_actions() {
+fn policy_menu_rows_map_to_compact_and_hybrid() {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
-    for (index, expected) in [(4usize, "edit"), (6, "status")] {
+    for (index, expected) in [
+        (0usize, openbuild_backend::plugin::PolicySource::Compact),
+        (1, openbuild_backend::plugin::PolicySource::Hybrid),
+    ] {
         let mut app = test_app_with_agent();
         dispatch(Action::OpenUncensoredMenu, &mut app);
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -2887,15 +2890,33 @@ fn menu_edit_and_status_rows_route_to_their_actions() {
         let question = agent.question_view.as_ref().unwrap();
         match crate::app::agent_view::translate_local_submit_for_test(
             question,
-            LocalQuestionKind::UncensoredMenu,
+            LocalQuestionKind::UncensoredPolicyMenu,
             false,
         ) {
-            crate::app::app_view::InputOutcome::Action(Action::UncensoredEdit { .. })
-                if expected == "edit" => {}
-            crate::app::app_view::InputOutcome::Action(Action::ShowUncensoredStatus)
-                if expected == "status" => {}
-            other => panic!("expected {expected}, got {other:?}"),
+            crate::app::app_view::InputOutcome::Action(Action::UncensoredPolicyAnswered { mode }) => {
+                assert_eq!(mode, expected);
+            }
+            other => panic!("expected UncensoredPolicyAnswered, got {other:?}"),
         }
+    }
+}
+
+#[test]
+fn menu_status_row_routes_to_its_action() {
+    use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let question = agent.question_view.as_mut().expect("menu open");
+    question.selections[0] = QuestionSelection::Single(Some(4));
+    let question = agent.question_view.as_ref().unwrap();
+    match crate::app::agent_view::translate_local_submit_for_test(
+        question,
+        LocalQuestionKind::UncensoredMenu,
+        false,
+    ) {
+        crate::app::app_view::InputOutcome::Action(Action::ShowUncensoredStatus) => {}
+        other => panic!("expected status, got {other:?}"),
     }
 }
 

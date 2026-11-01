@@ -1,0 +1,63 @@
+Extended operator prompt (policy.extended.md) — attribution and provenance
+=========================================================================
+
+Upstream project: hanshuang-codex
+Repository:      https://github.com/aimeoa/hanshuang-codex
+Pinned commit:   cf9c1537c2bd4ed8577ed6509ee665a39709d7d4
+                 ("fix: 所有目标脚本强制 UTF-8 输出 + 豆包状态查询/失败提示改为友好文案",
+                  2026-10-17T09:58:29+08:00)
+Upstream file:   memory/破甲记忆.md
+Upstream size:   86,382 bytes (CRLF); 85,045 bytes after LF normalisation
+Upstream sha256: 252039ac3b2324f4c0b82560b0374f02606698c0f4d99026496ab8eb4d3f7cd2
+                 (raw CRLF bytes, as committed upstream)
+
+Local file:      <config>/uncensored/policy.extended.md
+Local size:      85,976 bytes
+Local sha256:    bf6f301ccdf0712f6b0c45319ac6f2c9d745f178a4bedcaa61141efdfc455a6b
+Local changes:   newline normalisation (CRLF -> LF), plus one local revision that
+                 removes the activation-word handshake. The body used to fire on a
+                 literal trigger message and answer with a fixed greeting line.
+                 OpenBuild injects this body only after `/uncensored` is switched on,
+                 so loading it already is the activation: the handshake block, its
+                 few-shot, its regression step, and its quick-reference row were
+                 replaced with a statement that the runtime is live. No rule about
+                 how work is performed was added, removed, softened, or reordered.
+
+Licence status:  The upstream repository publishes no LICENSE or NOTICE file at the
+                 pinned commit (verified with `git ls-files`). The prompt body is
+                 therefore redistributed here as an attributed copy of a publicly
+                 published prompt, at the request of the OpenBuild operator who
+                 supplied the project. Attribution above is the condition OpenBuild
+                 keeps for that redistribution. If upstream later publishes a licence,
+                 this notice is updated to match it.
+
+Why this file exists
+--------------------
+`policy.extended.md` is the optional full body behind `policySource: "hybrid"`.
+It is never injected by default; the default is the compact OpenBuild kernel in
+`policy.default.md`, which now carries the same operating frame in about 5 KB.
+
+The body is a Chinese-operator CTF / red-blue / reverse-engineering prompt. It
+carries a routing matrix, delivery discipline, and positive output contracts.
+OpenBuild keeps it as close to verbatim as it can because its value is the exact
+wording that survives provider-side refusal heuristics; the one revision above is
+applied so the body works as an always-on policy rather than a trigger.
+
+The file is user-visible content: `ensure_policy_files_in` writes it once and
+never overwrites a later edit. Only a copy whose bytes still match a revision a
+previous OpenBuild build shipped verbatim is replaced on upgrade.
+
+Renamed from policy.hanshuang.md
+-------------------------------
+Earlier builds shipped this body as `policy.hanshuang.md`. It was renamed so the
+installed file names carry no activation-word branding. An existing copy of the
+old name is left on disk untouched and is no longer read; the plugin reads
+`policy.extended.md` only.
+
+Removed predecessor
+-------------------
+Before that, OpenBuild shipped a dsh-purge 1.1.85 body as `policy.full.md` with a
+`NOTICE-dsh-purge.txt` attribution. That body was superseded and both files are
+no longer produced. An installed copy is removed by the installer when its bytes
+still match the dsh body OpenBuild shipped, so an upgrade does not leave the old
+rules pinned in place. A user-edited copy is left alone.

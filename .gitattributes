@@ -1,6 +1,6 @@
 # The uncensored policy bodies are hashed byte-for-byte by tests and by
 # `/uncensored status`. A CRLF checkout would change both the byte count and
 # the sha256, so these files must stay LF on every platform.
-tui/grok-build/crates/codegen/openbuild-backend/plugin/policy.*.md text eol=lf
-tui/grok-build/crates/codegen/openbuild-backend/plugin/NOTICE-hanshuang.txt text eol=lf
-tests/uncensored-plugin.test.ts text eol=lf
+openbuild/tui/grok-build/crates/codegen/openbuild-backend/plugin/policy.*.md text eol=lf
+openbuild/tui/grok-build/crates/codegen/openbuild-backend/plugin/NOTICE-extended.txt text eol=lf
+openbuild/tests/uncensored-plugin.test.ts text eol=lf

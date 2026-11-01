@@ -123,6 +123,8 @@ pub enum LocalQuestionKind {
     /// it. On submit, the selected option index becomes an
     /// [`crate::app::actions::Action::UncensoredAnswered`].
     UncensoredMenu,
+    /// Second modal opened after "on": pick the policy mode (compact / hybrid).
+    UncensoredPolicyMenu,
 }
 
 /// Complete state for the question view overlay. Created when an `x.ai/ask_user_question`

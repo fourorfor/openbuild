@@ -1711,22 +1711,24 @@ fn translate_local_submit(
         }
         LocalQuestionKind::UncensoredMenu => {
             // 0/1 turn it on (with or without remembering), 2/3 turn it off,
-            // 4 opens the editor, 5 opens the variant picker, 6 prints status.
+            // 4 prints status. Turning on hands off to the policy-mode step.
             let (on, remember) = match *idx {
                 0 => (true, false),
                 1 => (true, true),
                 2 => (false, false),
                 3 => (false, true),
-                4 => return InputOutcome::Action(Action::UncensoredEdit { args: String::new() }),
-                5 => {
-                    return InputOutcome::Action(Action::UncensoredEdit {
-                        args: "--variant ".to_string(),
-                    });
-                }
-                6 => return InputOutcome::Action(Action::ShowUncensoredStatus),
+                4 => return InputOutcome::Action(Action::ShowUncensoredStatus),
                 _ => return InputOutcome::Changed,
             };
             InputOutcome::Action(Action::UncensoredAnswered { on, remember })
+        }
+        LocalQuestionKind::UncensoredPolicyMenu => {
+            let mode = match *idx {
+                0 => openbuild_backend::plugin::PolicySource::Compact,
+                1 => openbuild_backend::plugin::PolicySource::Hybrid,
+                _ => return InputOutcome::Changed,
+            };
+            InputOutcome::Action(Action::UncensoredPolicyAnswered { mode })
         }
     }
 }

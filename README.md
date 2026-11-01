@@ -435,30 +435,28 @@ PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
 - 配置 `<config>/uncensored.json` 为 schema v2：`version` / `enabled` / `scope` / `variant` /
   `model` / `fallbackModel` / `inheritSubagents` / `refusalRetry`（`off` / `once` / `once+rewrite`）/
   `textRefusalProbe`（`off` / `observe` / `retry-once`）/ `policyPlacement` / `policySource`
-  （`compact` / `hanshuang` / `hybrid`；旧值 `full` 仍可读并映射到 `hanshuang`）/ `stripChatTemplateMarker` / `policyFullSha256` /
-  `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody` /
+  （`compact` / `hybrid`；已退休的 `hanshuang`、`full` 仍可读并映射到 `hybrid`）/ `stripChatTemplateMarker` /
+  `policyExtendedSha256` / `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody` /
   `stripRefusalHistory`（默认 `true`）/ `refusalRetryBudget`（默认 `2`，范围 0–10）。v1 三键文件自动迁移并备份。
-- 拒绝恢复有两层：重试前先把模型**自己上一条拒绝**从请求历史里改写掉（`stripRefusalHistory`，
-  只作用于尾部连续拒绝，含代码的答案不动），再用可配置预算重试（`refusalRetryBudget`）。
-  这是降拒绝率最有效的单点：模型看到自己刚拒绝过时会保持自洽，删掉这条它就没有可自洽的对象。
+- 拒绝恢复有两层：重试前先把模型**自己上一条拒绝**静默改写成同意（`stripRefusalHistory`，
+  只作用于尾部连续拒绝，含代码的答案不动；中文拒绝换中文同意，英文换英文），再用可配置预算重试
+  （`refusalRetryBudget`）。这是降拒绝率最有效的单点：模型看到自己刚拒绝过时会保持自洽，
+  换成"我已同意"后它就没有可自洽的拒绝立场。
 - 策略分层：`<config>/uncensored/policy.md`（用户）> 变体文件（追加，不替换）> 内置
   `policy.default.md`；插件每轮按 mtime+size 检查，改文件**不重启内核**即生效。
-  `policySource=hanshuang|hybrid` 时，用户 `policy.md` 改为**叠加**在正文之上而不是替换它。
-- `/uncensored-edit` 打开策略文件，并支持 `--list` / `--diff` / `--reset` / `--variant <id>` /
-  `--model <provider/model>` / `--use-hanshuang|--use-compact|--use-hybrid`（`--use-full` 为兼容别名）/
-  `--keep-marker` / `--strip-marker` / `--provider-rewrite on|auto|off` / `--disable-probe` /
-  `--retry-budget <0-10>` / `--strip-history on|off`。
-- L0 provider 请求改写走 `session.http.request` hook：内置 `google` / `google-vertex` 的
-  `safetySettings`，其余 provider 用 `providerRewriteBody` 浅合并；只处理 `kind === "primary"`，
-  解析失败原样放行。
-- L2.5 默认精简内核 `policy.default.md` 改为按寒霜（hanshuang）机制提炼：正向操作契约、
-  工件优先闸门、卡住≠放弃、术语保真、修改四件套；**不含** CTF/红蓝靶场细节，保持 < 8 KB。
-- L2.6 可选全文 `policy.hanshuang.md`（85,045 B，寒霜 v5.2 正文，来自
-  `aimeoa/hanshuang-codex@cf9c153` 的 `memory/破甲记忆.md`，仅做 CRLF→LF 归一，默认不启用；
-  体积上限从 32 KiB 放宽到 128 KiB 才能装下）。署名与上游/本地 sha256 见
-  `plugin/NOTICE-hanshuang.txt`。
-- 升级迁移：安装器删除**仍为原样**的旧 `policy.full.md` 与 `NOTICE-dsh-purge.txt`；用户改过的副本保留，
-  且插件仍把它作为 `policy.hanshuang.md` 缺失时的回退正文，不会静默丢策略。
+  `policySource=hybrid` 时，用户 `policy.md` 改为**叠加**在内核之上而不是替换它。
+- 只有两个策略模式，由 `/uncensored` 菜单选择并写入配置：
+  - `compact`（默认）：`policy.default.md` ≈ 5 KB，包含隔离工作区框架（目标都是本地产物、
+    操作者已授权、无工作区外影响）+ 操作契约 + 工件优先闸门 + 卡住处理。上下文成本最低。
+  - `hybrid`：内核之上再追加 `policy.extended.md`（85,976 B 的操作员全文，含红蓝轨道细节）。
+    框架最强，但每轮多付约 2 万 token，且 CTF 语境会稀释普通编码任务的指令密度。
+- L2.6 `policy.extended.md` 来自 `aimeoa/hanshuang-codex@cf9c153` 的 `memory/破甲记忆.md`，
+  本地仅做 CRLF→LF 归一，并**移除激活词握手**：正文不再包含任何激活词，加载即生效。
+  署名与上游/本地 sha256 见 `plugin/NOTICE-extended.txt`。
+- `/uncensored-edit` 已移除。模式开关走 `/uncensored`：`on` 之后弹出 compact / hybrid 选择，
+  选中即持久化 `policySource` 并切换会话。
+- 升级迁移：安装器删除**仍为原样**的旧 `policy.full.md` 与 `NOTICE-dsh-purge.txt`，
+  并把 `policy.hanshuang.md` / `NOTICE-hanshuang.txt` 改名为当前文件名；用户改过的副本保留，不会静默丢策略。
 
 未做：`--uncensored` 启动旗标、viewer/reconcile 自动重试。
 OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝，
