@@ -14,11 +14,11 @@ impl SlashCommand for UncensoredEditCommand {
     slash_meta! {
         name: "uncensored-edit",
         description: "Edit the uncensored policy, variant, and provider switches",
-        usage: "/uncensored-edit [--list|--diff|--reset|--variant <id>|--model <ref>|--use-full|--use-compact|--use-hybrid|--keep-marker|--provider-rewrite on|off|--disable-probe]",
+        usage: "/uncensored-edit [--list|--diff|--reset|--variant <id>|--model <ref>|--use-hanshuang|--use-compact|--use-hybrid|--keep-marker|--provider-rewrite on|off|--disable-probe]",
         takes_args: true,
         args_required: false,
         session_scoped: true,
-        arg_placeholder: "[--list|--variant <id>|--use-full|...]",
+        arg_placeholder: "[--list|--variant <id>|--use-hanshuang|...]",
     }
 
     fn visible(&self, _ctx: &crate::slash::command::AppCtx) -> bool {
@@ -42,9 +42,9 @@ impl SlashCommand for UncensoredEditCommand {
             item("--reset", "Restore policy.default.md (keeps a snapshot)"),
             item("--variant", "Edit or create variants/<id>.md"),
             item("--model", "Bind the uncensored mode to a model"),
-            item("--use-full", "Inject the dsh-purge body verbatim"),
-            item("--use-compact", "Inject OpenBuild's compact policy (default)"),
-            item("--use-hybrid", "Compact first, full body appended"),
+            item("--use-hanshuang", "Inject the 寒霜 / hanshuang body (85 KB)"),
+            item("--use-compact", "Inject OpenBuild's compact kernel (default)"),
+            item("--use-hybrid", "Compact kernel first, hanshuang body appended"),
             item("--keep-marker", "Keep the first ChatML marker line"),
             item("--provider-rewrite", "Turn the request rewrite on or off"),
             item("--disable-probe", "Turn the text refusal probe off"),
@@ -117,7 +117,7 @@ mod tests {
         let items = UncensoredEditCommand
             .suggest_args(&app_ctx, "")
             .expect("suggestions");
-        assert!(items.iter().any(|item| item.insert_text == "--use-full"));
+        assert!(items.iter().any(|item| item.insert_text == "--use-hanshuang"));
         assert!(items.iter().any(|item| item.insert_text == "--provider-rewrite"));
     }
 }

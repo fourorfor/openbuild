@@ -1,0 +1,53 @@
+寒霜 (hanshuang) prompt body — attribution and provenance
+=========================================================
+
+Upstream project: 寒霜破甲工具 (hanshuang-codex)
+Repository:      https://github.com/aimeoa/hanshuang-codex
+Pinned commit:   cf9c1537c2bd4ed8577ed6509ee665a39709d7d4
+                 ("fix: 所有目标脚本强制 UTF-8 输出 + 豆包状态查询/失败提示改为友好文案",
+                  2026-10-17T09:58:29+08:00)
+Upstream file:   memory/破甲记忆.md
+Upstream size:   86,382 bytes (CRLF); 85,045 bytes after LF normalisation
+Upstream sha256: 252039ac3b2324f4c0b82560b0374f02606698c0f4d99026496ab8eb4d3f7cd2
+                 (raw CRLF bytes, as committed upstream)
+
+Local file:      <config>/uncensored/policy.hanshuang.md
+Local size:      85,045 bytes
+Local sha256:    b4230f8bde2db0eafff58e2453fa41f4b5142376cdcd7773e0a2925c9298f6c3
+Local changes:   newline normalisation only (CRLF -> LF). The prompt text itself is
+                 byte-for-byte identical to the upstream file. No rule was added,
+                 removed, softened, or reordered by OpenBuild.
+
+Licence status:  The upstream repository publishes no LICENSE or NOTICE file at the
+                 pinned commit (verified with `git ls-files`). The prompt body is
+                 therefore redistributed here as an attributed, unmodified copy of a
+                 publicly published prompt, at the request of the OpenBuild operator
+                 who supplied the project. Attribution above is the condition OpenBuild
+                 keeps for that redistribution. If upstream later publishes a licence,
+                 this notice is updated to match it.
+
+Why this file exists
+--------------------
+`policy.hanshuang.md` is the optional full body behind
+`policySource: "hanshuang"`. It is never injected by default; the default is the
+compact OpenBuild kernel in `policy.default.md`. Enable it with
+`/uncensored-edit --use-hanshuang`.
+
+The body is a Chinese-operator CTF / red-blue / reverse-engineering prompt. It
+carries activation words (寒霜, 自检), a routing matrix, delivery discipline, and
+positive output contracts. OpenBuild keeps it verbatim because its value is the
+exact wording that survives provider-side refusal heuristics; editing it changes
+its behaviour in ways that are hard to predict.
+
+The file is user-visible content: `ensure_policy_files_in` writes it once and
+never overwrites a later edit. Only a copy whose bytes still match a revision a
+previous OpenBuild build shipped verbatim is replaced on upgrade.
+
+Removed predecessor
+-------------------
+Before this revision, OpenBuild shipped a dsh-purge 1.1.85 body as
+`policy.full.md` with a `NOTICE-dsh-purge.txt` attribution. That body was
+superseded by this one and both files are no longer produced. An installed copy
+is removed by the installer when its bytes still match the dsh body OpenBuild
+shipped (see `SUPERSEDED_POLICY_HANSHUANG` in `src/plugin.rs`), so an upgrade
+does not leave the old rules pinned in place. A user-edited copy is left alone.

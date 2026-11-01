@@ -308,24 +308,31 @@ fn policy_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<Str
         config.policy_rev
     )];
     match status.source {
-        PolicySource::Compact => lines.push("Policy source: compact (default)".to_string()),
-        PolicySource::Full | PolicySource::Hybrid => {
-            let source = if status.source == PolicySource::Full {
-                "full"
-            } else {
-                "hybrid"
-            };
+        PolicySource::Compact => lines.push("Policy source: compact kernel (default)".to_string()),
+        PolicySource::Hanshuang | PolicySource::Hybrid => {
             let sha = status
-                .full_sha256
+                .body_sha256
                 .as_deref()
                 .map(|sha| sha[..sha.len().min(12)].to_string())
                 .unwrap_or_else(|| "<missing>".to_string());
+            let file = status
+                .body_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("policy.hanshuang.md");
             lines.push(format!(
-                "Policy source: {source} (policy.full.md, {} bytes, sha256 {sha}, dsh-purge 1.1.85 Apache-2.0)",
-                status.full_bytes
+                "Policy source: {} ({file}, {} bytes, sha256 {sha})",
+                status.source.label(),
+                status.body_bytes
             ));
-            if status.full_bytes > 0 && !status.full_intact {
-                lines.push("Policy full: modified from upstream (kept; not overwritten)".to_string());
+            if status.body_bytes == 0 {
+                lines.push(
+                    "Policy body: missing; run OpenBuild once to install policy.hanshuang.md"
+                        .to_string(),
+                );
+            } else if !status.body_intact {
+                lines.push("Policy body: modified from the bundled copy (kept; not overwritten)".to_string());
             }
             lines.push(format!(
                 "Marker: {}",

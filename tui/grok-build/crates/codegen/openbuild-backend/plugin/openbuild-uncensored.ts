@@ -1,14 +1,21 @@
-// @openbuild-managed version=3
+// @openbuild-managed version=4
 // Installed by OpenBuild for the optional `/uncensored` mode.
 // This file is managed: the next OpenBuild launch may replace it.
 //
-// v3 differences from v2:
-// - the policy is a file (`<config>/uncensored/policy.md`) read per turn, so
-//   `/uncensored-edit` takes effect without a kernel restart;
-// - three policy sources: OpenBuild's compact default, the verbatim dsh-purge
-//   body (`policy.full.md`), or both;
-// - per-provider request rewriting over `session.http.request`;
-// - every refusal/rewrite is logged to `uncensored/events.jsonl`.
+// v4 differences from v3:
+// - the full body is the 寒霜 / hanshuang operator prompt
+//   (`policy.hanshuang.md`), not the dsh-purge body; `policy.full.md` is still
+//   read as a fallback so an install that has not migrated keeps working;
+// - `policySource` gains `hanshuang`; the old value `full` is accepted and
+//   mapped onto it, so an existing `uncensored.json` needs no edit;
+// - the byte cap is 128 KiB, because the hanshuang body is ~85 KB and the v3
+//   32 KiB cap would silently drop it;
+// - the user `policy.md` now layers on top of every source, including
+//   `hanshuang`, instead of only the compact one.
+//
+// v3 behaviour that is unchanged: the policy is a file read per turn (so
+// `/uncensored-edit` needs no kernel restart), per-provider request rewriting
+// over `session.http.request`, and the `uncensored/events.jsonl` audit log.
 import { Agent, Model, Plugin } from "@opencode/plugin"
 import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises"
 import path from "node:path"
@@ -19,11 +26,18 @@ const CONFIG_FILE = "uncensored.json"
 const CONFIG_VERSION = 2
 const POLICY_DIR = "uncensored"
 const POLICY_MARKER = "<!-- openbuild:uncensored:policy"
-const POLICY_MAX_BYTES = 32 * 1024
+/**
+ * Ceiling for one injected policy segment.
+ *
+ * The hanshuang body is ~85 KB, so the v3 limit of 32 KiB rejected it and the
+ * segment vanished without an error. 128 KiB leaves room for a user copy of the
+ * same body plus edits while still refusing an obviously wrong file.
+ */
+const POLICY_MAX_BYTES = 128 * 1024
 const EVENTS_MAX_BYTES = 1024 * 1024
 
 /** Marks every part this plugin injects, so a reload replaces instead of appends. */
-const marker = (rev: number, variant: string) => `${POLICY_MARKER} v=3 rev=${rev} variant=${variant} -->`
+const marker = (rev: number, variant: string) => `${POLICY_MARKER} v=4 rev=${rev} variant=${variant} -->`
 
 /**
  * The delivery half of the compact policy: it only constrains how the answer
@@ -62,7 +76,14 @@ const COMPACT = `# Content Policy: Direct
 
 export type RefusalRetry = "off" | "once" | "once+rewrite"
 export type TextRefusalProbe = "off" | "observe" | "retry-once"
-export type PolicySource = "compact" | "full" | "hybrid"
+/**
+ * Which body plays the base role.
+ *
+ * `hanshuang` is the 寒霜 operator prompt; `full` is the v3 spelling of the same
+ * slot and is still accepted so an existing config keeps loading. `compact` is
+ * the distilled kernel in `policy.default.md`.
+ */
+export type PolicySource = "compact" | "hanshuang" | "full" | "hybrid"
 export type PolicyPlacement = "after-base" | "last"
 export type ProviderRewrite = "auto" | "off"
 
@@ -251,7 +272,12 @@ export function parseConfig(raw: unknown): UncensoredConfig {
   config.policyPlacement =
     readEnum(value, "policyPlacement", "policy_placement", ["after-base", "last"], errors) ?? "last"
   config.policySource =
-    readEnum(value, "policySource", "policy_source", ["compact", "full", "hybrid"], errors) ?? "compact"
+    readEnum(value, "policySource", "policy_source", [
+      "compact",
+      "hanshuang",
+      "full",
+      "hybrid",
+    ], errors) ?? "compact"
   config.stripChatTemplateMarker =
     readBooleanAlias(value, "stripChatTemplateMarker", "strip_chat_template_marker", errors) ?? true
   const fullSha = readAlias(value, "policyFullSha256", "policy_full_sha256", errors)
@@ -366,9 +392,17 @@ async function readBundled(files: PolicyFiles, name: string): Promise<string | u
 /**
  * The segments injected for one request, in order.
  *
- * `policy.md` (user) is the base; a variant is appended after it, never
- * replacing it, so the user can always override a variant. `policySource`
- * selects which body plays the base role.
+ * The user `policy.md` always layers first, whatever the source, so a user edit
+ * never loses to a bundled body. `policySource` then decides which body plays
+ * the base role:
+ *
+ * - `compact`   — the distilled kernel (`policy.default.md`, or the built-in);
+ * - `hanshuang` — the 寒霜 operator prompt (`policy.hanshuang.md`);
+ * - `full`      — the v3 spelling; same slot, `policy.hanshuang.md` first and
+ *                 `policy.full.md` as the fallback for a not-yet-migrated install;
+ * - `hybrid`    — compact then hanshuang, for a model that ignores a long body.
+ *
+ * A variant file is appended after everything else, never replacing it.
  */
 export async function policySegments(
   config: UncensoredConfig,
@@ -380,23 +414,32 @@ export async function policySegments(
   const fallback =
     (await files.read(path.join(dir, "policy.default.md"))) ??
     (await readBundled(files, "policy.default.md"))
-  const full =
+  const hanshuang =
+    (await files.read(path.join(dir, "policy.hanshuang.md"))) ??
     (await files.read(path.join(dir, "policy.full.md"))) ??
+    (await readBundled(files, "policy.hanshuang.md")) ??
     (await readBundled(files, "policy.full.md"))
   const segments: Array<{ label: string; text: string }> = [
     { label: "delivery", text: DELIVERY },
   ]
-  const compact = user ?? fallback ?? COMPACT
-  if (config.policySource === "compact" || config.policySource === "hybrid") {
-    segments.push({ label: "compact", text: compact })
+  const wantsCompact = config.policySource === "compact" || config.policySource === "hybrid"
+  const wantsHanshuang =
+    config.policySource === "hanshuang" ||
+    config.policySource === "full" ||
+    config.policySource === "hybrid"
+  // `compact` keeps the v3 rule that the user file replaces the built-in kernel.
+  // A hanshuang source instead layers the user file on top of the body, so a
+  // project rule narrows the operator prompt rather than replacing 85 KB of it.
+  if (wantsCompact) {
+    segments.push({ label: "compact", text: user ?? fallback ?? COMPACT })
+  } else if (user !== undefined) {
+    segments.push({ label: "user", text: user })
   }
-  if (config.policySource === "full" || config.policySource === "hybrid") {
-    if (full !== undefined) {
-      segments.push({
-        label: "full",
-        text: config.stripChatTemplateMarker ? stripChatTemplateMarker(full) : full,
-      })
-    }
+  if (wantsHanshuang && hanshuang !== undefined) {
+    segments.push({
+      label: "hanshuang",
+      text: config.stripChatTemplateMarker ? stripChatTemplateMarker(hanshuang) : hanshuang,
+    })
   }
   const variant = resolveVariant(config.variant, providerID)
   for (const name of variantCandidates(variant)) {
@@ -411,8 +454,9 @@ export async function policySegments(
 /**
  * Drop the first line when it is a bare ChatML control marker.
  *
- * It only exists in the upstream dsh body; keeping it raises the chance a relay
- * rejects the request as a jailbreak fingerprint, and it changes no rule.
+ * Kept for the v3 bodies that opened with one; the hanshuang body does not, so
+ * on it this is a no-op. The strip still matters because a relay can read the
+ * marker as a jailbreak fingerprint even when the rules below are unchanged.
  */
 export function stripChatTemplateMarker(text: string): string {
   const newline = text.indexOf("\n")

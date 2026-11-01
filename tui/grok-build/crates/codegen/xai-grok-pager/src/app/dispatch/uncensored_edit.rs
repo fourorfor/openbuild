@@ -42,7 +42,9 @@ pub(crate) fn parse_args(args: &str) -> Result<EditAction, String> {
         "--list" | "-l" => no_more(rest).map(|()| EditAction::List),
         "--diff" => no_more(rest).map(|()| EditAction::Diff),
         "--reset" => no_more(rest).map(|()| EditAction::Reset),
-        "--use-full" => no_more(rest).map(|()| EditAction::SetSource(PolicySource::Full)),
+        "--use-full" | "--use-hanshuang" => {
+            no_more(rest).map(|()| EditAction::SetSource(PolicySource::Hanshuang))
+        }
         "--use-compact" => no_more(rest).map(|()| EditAction::SetSource(PolicySource::Compact)),
         "--use-hybrid" => no_more(rest).map(|()| EditAction::SetSource(PolicySource::Hybrid)),
         "--keep-marker" => no_more(rest).map(|()| EditAction::KeepMarker(true)),
@@ -72,7 +74,7 @@ pub(crate) fn parse_args(args: &str) -> Result<EditAction, String> {
         },
         other => Err(format!(
             "unknown /uncensored-edit argument: {other}. Use --list, --diff, --reset, --variant <id>, \
-             --model <ref>, --use-full, --use-compact, --use-hybrid, --keep-marker, \
+             --model <ref>, --use-hanshuang, --use-compact, --use-hybrid, --keep-marker, \
              --provider-rewrite on|off, or --disable-probe."
         )),
     }
@@ -150,10 +152,11 @@ pub(crate) fn dispatch_uncensored_edit(app: &mut AppView, args: &str) -> Vec<Eff
             }) {
                 Ok(_) => {
                     let mut message =
-                        format!("Policy source: {}.", source.as_str());
+                        format!("Policy source: {}.", source.label());
                     if source == PolicySource::Hybrid {
                         message.push_str(
-                            " hybrid injects two delivery rule sets; editing policy.md is cleaner.",
+                            " hybrid injects the compact kernel and then the hanshuang body; \
+                             a model that follows the last instruction best can ignore the kernel.",
                         );
                     }
                     push_block(app, &message);
@@ -305,11 +308,11 @@ fn list_variants(config_dir: &std::path::Path, config: &UncensoredConfig) -> Str
     } else {
         lines.push(format!("Variants: {}", found.join(", ")));
     }
-    if let Ok(text) = std::fs::read_to_string(plugin::uncensored_policy_full_path(config_dir)) {
+    if let Ok(text) = std::fs::read_to_string(plugin::uncensored_policy_hanshuang_path(config_dir)) {
         lines.push(format!(
-            "Full body: {} bytes, sha256 {} (dsh-purge 1.1.85 Apache-2.0)",
+            "Hanshuang body: {} bytes, sha256 {} (policy.hanshuang.md)",
             text.len(),
-            file_sha256(&plugin::uncensored_policy_full_path(config_dir))
+            file_sha256(&plugin::uncensored_policy_hanshuang_path(config_dir))
                 .chars()
                 .take(12)
                 .collect::<String>()
@@ -412,8 +415,13 @@ mod tests {
     #[test]
     fn source_switches_map_to_the_policy_source() {
         assert_eq!(
+            parse_args("--use-hanshuang"),
+            Ok(EditAction::SetSource(PolicySource::Hanshuang))
+        );
+        // The v3 spelling keeps working and lands on the same slot.
+        assert_eq!(
             parse_args("--use-full"),
-            Ok(EditAction::SetSource(PolicySource::Full))
+            Ok(EditAction::SetSource(PolicySource::Hanshuang))
         );
         assert_eq!(
             parse_args("--use-compact"),
@@ -465,6 +473,6 @@ mod tests {
     #[test]
     fn unknown_flags_name_the_valid_options() {
         let error = parse_args("--nope").expect_err("must fail");
-        assert!(error.contains("--use-full"), "{error}");
+        assert!(error.contains("--use-hanshuang"), "{error}");
     }
 }
