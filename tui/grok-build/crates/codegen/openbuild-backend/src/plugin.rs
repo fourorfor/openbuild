@@ -673,6 +673,38 @@ pub fn uncensored_events_path(config_dir: &Path) -> PathBuf {
     uncensored_dir(config_dir).join("events.jsonl")
 }
 
+/// Append one line to `<config>/uncensored/events.jsonl`, rolling at 1 MiB.
+///
+/// The kernel plugin writes its own events; the TUI writes the text-refusal
+/// probe hits here so a probe that fired (or deliberately did not) is
+/// diagnosable from the same file. Best effort: a logging failure must never
+/// change what the turn does.
+pub fn append_uncensored_event(event: &str, detail: &str) {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let Some(config_dir) = effective_config_dir() else {
+        return;
+    };
+    let path = uncensored_events_path(&config_dir);
+    if let Some(parent) = path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    // Roll before appending so the file never grows past the cap.
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
+        let _ = fs::rename(&path, path.with_extension("jsonl.1"));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("{{\"ts\":{stamp},\"event\":\"{event}\",\"detail\":\"{detail}\"}}\n");
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// Inspect `<effective config>/uncensored.json`.
 pub fn uncensored_config() -> UncensoredConfig {
     uncensored_config_in(effective_config_dir().as_deref())

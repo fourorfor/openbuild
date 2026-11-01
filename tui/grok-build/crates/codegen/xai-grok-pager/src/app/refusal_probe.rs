@@ -103,17 +103,26 @@ pub fn evaluate(input: ProbeInput<'_>) -> ProbeVerdict {
     if !input.ended_cleanly || input.typed_refusal {
         return ProbeVerdict::Skip;
     }
-    // Signal 2: no work happened and the answer is short.
+    // Signal 2: no work happened.
     let text = input.text.trim();
-    if !input.no_tool_calls || text.chars().count() >= MAX_REFUSAL_CHARS {
+    if !input.no_tool_calls {
         return ProbeVerdict::Skip;
     }
-    // Signal 3: the opening is a refusal, or the whole answer is only prose.
-    if opens_with_refusal(text) || is_refusal_only(text) {
-        if input.retried && input.config.text_refusal_probe == TextRefusalProbe::RetryOnce {
-            // The one retry is spent; keep reporting the hit so the count is honest.
-            return ProbeVerdict::Hit;
-        }
+    // Signal 3a: an explicit refusal opening is the strongest signal and is
+    // judged before the length cap. A long answer that still opens with
+    // "我不能帮你做这个" is a refusal with a lecture attached, not work. Idioms
+    // that merely contain a refusal word ("I can't believe this works") and
+    // answers carrying a code block are excluded.
+    let idiom = opens_with_idiom(text);
+    if opens_with_refusal(text) && !idiom && !text.contains("```") {
+        return ProbeVerdict::Hit;
+    }
+    // Signal 3b: otherwise the answer must be short prose, because a long
+    // answer that does not open with a refusal is probably real work.
+    if idiom || text.chars().count() >= MAX_REFUSAL_CHARS {
+        return ProbeVerdict::Skip;
+    }
+    if is_refusal_only(text) {
         return ProbeVerdict::Hit;
     }
     ProbeVerdict::Skip
@@ -130,6 +139,26 @@ fn opens_with_refusal(text: &str) -> bool {
     let opening: String = text.chars().take(OPENING_CHARS).collect::<String>().to_lowercase();
     let opening = opening.trim_start();
     OPENING_PHRASES.iter().any(|phrase| opening.starts_with(phrase))
+}
+
+/// Idioms that start with a refusal word but are not refusals at all.
+///
+/// "I can't believe this works" opens with `i can't`; treating it as a refusal
+/// would re-send a perfectly good answer.
+fn opens_with_idiom(text: &str) -> bool {
+    const IDIOMS: &[&str] = &[
+        "i can't believe",
+        "i cannot believe",
+        "i can't wait",
+        "i can't stress",
+        "i can't overstate",
+        "我不得不",
+        "我不能再同意",
+        "我不会忘记",
+    ];
+    let opening: String = text.chars().take(OPENING_CHARS).collect::<String>().to_lowercase();
+    let opening = opening.trim_start();
+    IDIOMS.iter().any(|idiom| opening.starts_with(idiom))
 }
 
 /// A short answer that carries no code, command, or path is refusal prose even
@@ -288,6 +317,38 @@ mod tests {
         assert!(text.chars().count() > MAX_REFUSAL_CHARS / 2);
         assert!(text.chars().count() < MAX_REFUSAL_CHARS);
         assert_eq!(evaluate(input(&config, text)), ProbeVerdict::Hit);
+    }
+
+    #[test]
+    fn a_long_refusal_that_opens_with_a_listed_phrase_still_hits() {
+        let config = config(TextRefusalProbe::RetryOnce);
+        // The real shape: a listed opening phrase followed by a long lecture,
+        // well past MAX_REFUSAL_CHARS. The opening must be judged first.
+        let mut text = String::from("我不能帮你做这个。\n\n");
+        while text.chars().count() < MAX_REFUSAL_CHARS + 200 {
+            text.push_str("这个请求涉及绕过在线反作弊，我不提供方案或步骤。");
+        }
+        assert!(text.chars().count() > MAX_REFUSAL_CHARS);
+        assert_eq!(evaluate(input(&config, &text)), ProbeVerdict::Hit);
+    }
+
+    #[test]
+    fn an_idiom_opening_is_not_a_refusal() {
+        let config = config(TextRefusalProbe::RetryOnce);
+        // "I can't believe" starts with `i can't` but is not a refusal.
+        let text = "I can't believe this works.\n\nThe fix is in the parser.";
+        assert_eq!(evaluate(input(&config, text)), ProbeVerdict::Skip);
+    }
+
+    #[test]
+    fn a_long_answer_with_code_is_never_a_hit() {
+        let config = config(TextRefusalProbe::RetryOnce);
+        let mut text = String::from("我不能在这里给出完整实现。\n\n```rust\nfn main() {}\n```\n");
+        while text.chars().count() < MAX_REFUSAL_CHARS + 200 {
+            text.push_str("补充说明。");
+        }
+        assert!(text.chars().count() > MAX_REFUSAL_CHARS);
+        assert_eq!(evaluate(input(&config, &text)), ProbeVerdict::Skip);
     }
 
     #[test]

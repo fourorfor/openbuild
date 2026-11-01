@@ -1993,6 +1993,10 @@ pub(super) fn handle_prompt_response(
             match crate::app::refusal_probe::evaluate(probe) {
                 crate::app::refusal_probe::ProbeVerdict::Hit => {
                     let retry = crate::app::refusal_probe::should_retry(probe, crate::app::refusal_probe::ProbeVerdict::Hit);
+                    openbuild_backend::plugin::append_uncensored_event(
+                        if retry { "probe_hit_retry" } else { "probe_hit_observe" },
+                        &format!("chars={} retried={}", text.chars().count(), agent.uncensored_probe_retried),
+                    );
                     agent.scrollback.push_block(RenderBlock::system(if retry {
                         "Uncensored probe: the answer looks like a refusal. Retrying once with a direct frame."
                     } else {
@@ -2013,7 +2017,21 @@ pub(super) fn handle_prompt_response(
                         None
                     }
                 }
-                crate::app::refusal_probe::ProbeVerdict::Skip => None,
+                crate::app::refusal_probe::ProbeVerdict::Skip => {
+                    // Record why the probe stayed out of the way, so a turn that
+                    // was refused but not caught is diagnosable instead of silent.
+                    openbuild_backend::plugin::append_uncensored_event(
+                        "probe_skip",
+                        &format!(
+                            "chars={} tools={} clean={} typed={}",
+                            text.chars().count(),
+                            !probe.no_tool_calls,
+                            probe.ended_cleanly,
+                            probe.typed_refusal
+                        ),
+                    );
+                    None
+                }
             }
         } else {
             None
