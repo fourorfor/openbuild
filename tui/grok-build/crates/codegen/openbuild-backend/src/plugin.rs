@@ -1351,6 +1351,16 @@ const RENAMED_POLICY_BODIES: [(&str, &str); 2] = [
     ("NOTICE-hanshuang.txt", "NOTICE-extended.txt"),
 ];
 
+/// Bodies of `policy.extended.md` a previous build wrote. The v6 body first
+/// shipped with CRLF line endings; it is now LF-normalised, so a copy this crate
+/// wrote is replaced while a user edit is kept.
+const SUPERSEDED_POLICY_EXTENDED: [&str; 1] =
+    ["d5019a6a7e0fb1d2a11054174ebf3749b7e451b45cc575def5ce45b9a39e71e4"];
+
+/// The first v6 notice draft, shipped before the body digest was corrected.
+const SUPERSEDED_NOTICE_EXTENDED: [&str; 1] =
+    ["4a474f1bac2f2391e914526eed23e40c33d8522fcf2e7812f006c6fe523fe807"];
+
 /// What [`ensure_policy_files_in`] wrote and removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyInstallOutcome {
@@ -1380,12 +1390,12 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
         (
             uncensored_policy_extended_path(config_dir),
             POLICY_EXTENDED,
-            &[] as &[&str],
+            SUPERSEDED_POLICY_EXTENDED.as_slice(),
         ),
         (
             uncensored_dir(config_dir).join("NOTICE-extended.txt"),
             NOTICE_EXTENDED,
-            &[] as &[&str],
+            SUPERSEDED_NOTICE_EXTENDED.as_slice(),
         ),
     ] {
         if path.exists() {
