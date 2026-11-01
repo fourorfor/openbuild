@@ -738,6 +738,9 @@ pub enum Action {
     },
     /// Open the `/uncensored` option menu as a local modal.
     OpenUncensoredMenu,
+    /// Open the policy-mode step directly, for `/uncensored on`: the user already
+    /// said "on", so only the strength is left to choose.
+    OpenUncensoredPolicyMenu,
     /// Apply a policy-mode answer from the second `/uncensored` step.
     UncensoredPolicyAnswered {
         mode: openbuild_backend::plugin::PolicySource,

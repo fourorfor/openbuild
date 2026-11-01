@@ -53,7 +53,7 @@ impl SlashCommand for UncensoredCommand {
             // see and change the mode without remembering the flags.
             "" => CommandResult::Action(Action::OpenUncensoredMenu),
             "status" => CommandResult::Action(Action::ShowUncensoredStatus),
-            "on" => CommandResult::Action(Action::SetUncensoredMode(true)),
+            "on" => CommandResult::Action(Action::OpenUncensoredPolicyMenu),
             "off" => CommandResult::Action(Action::SetUncensoredMode(false)),
             other => CommandResult::Error(format!(
                 "Unknown /uncensored argument: {other}. Use on, off, status, or no argument for the menu."
@@ -84,13 +84,13 @@ mod tests {
     }
 
     #[test]
-    fn on_requests_the_uncensored_mode() {
+    fn on_opens_the_policy_step() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut context = ctx(&models, &bundle);
         assert!(matches!(
             UncensoredCommand.run(&mut context, "on"),
-            CommandResult::Action(Action::SetUncensoredMode(true))
+            CommandResult::Action(Action::OpenUncensoredPolicyMenu)
         ));
     }
 

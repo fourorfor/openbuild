@@ -475,8 +475,22 @@ pub(super) fn open_uncensored_policy_menu(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     if agent.question_view.is_some() {
-        app.show_toast("Finish answering the current question first");
-        return vec![];
+        // A second `/uncensored` while our own menu is still mounted replaces it
+        // rather than refusing: the user is steering the same decision, and the
+        // first-level modal is already spent by the time the policy step runs.
+        let ours = agent.question_view.as_ref().is_some_and(|qv| {
+            matches!(
+                qv.local_kind,
+                Some(LocalQuestionKind::UncensoredMenu)
+                    | Some(LocalQuestionKind::UncensoredPolicyMenu)
+            )
+        });
+        if !ours {
+            app.show_toast("Finish answering the current question first");
+            return vec![];
+        }
+        agent.question_view = None;
+        agent.cleanup_question_state();
     }
     let option = |label: &str, description: &str| QuestionOption {
         label: label.to_string(),

@@ -3015,3 +3015,58 @@ fn the_menu_refuses_to_stack_on_an_open_question() {
     let second = test_agent(&app, AgentId(0)).question_view.as_ref().map(|q| q.tool_call_id.clone());
     assert_eq!(first, second, "the original modal stays mounted");
 }
+
+/// The whole path the user actually takes: open `/uncensored`, answer "On"
+/// through the real submit pipeline, dispatch the resulting action, and find the
+/// policy menu mounted. Guards against the action mapping being right while the
+/// dispatch step silently refuses the second modal.
+#[test]
+fn answering_on_from_the_menu_opens_the_policy_step() {
+    use crate::views::question_view::QuestionSelection;
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let question = agent.question_view.as_mut().expect("menu open");
+    question.selections[0] = QuestionSelection::Single(Some(0));
+    let outcome = agent.submit_question_answers_for_test(false);
+
+    let action = match outcome {
+        crate::app::app_view::InputOutcome::Action(action) => action,
+        other => panic!("the menu must yield an action, got {other:?}"),
+    };
+    dispatch(action, &mut app);
+
+    let question = test_agent(&app, AgentId(0))
+        .question_view
+        .as_ref()
+        .expect("the policy step must be mounted");
+    assert!(
+        matches!(
+            question.local_kind,
+            Some(crate::views::question_view::LocalQuestionKind::UncensoredPolicyMenu)
+        ),
+        "expected the policy menu, got {:?}",
+        question.local_kind
+    );
+    assert_eq!(question.questions[0].options.len(), 2);
+}
+
+/// `/uncensored on` is the fast path; it must reach the same policy step as the
+/// menu answer instead of switching straight to the agent.
+#[test]
+fn the_on_command_opens_the_policy_step() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredPolicyMenu, &mut app);
+
+    let question = test_agent(&app, AgentId(0))
+        .question_view
+        .as_ref()
+        .expect("the policy step must be mounted");
+    assert!(matches!(
+        question.local_kind,
+        Some(crate::views::question_view::LocalQuestionKind::UncensoredPolicyMenu)
+    ));
+    // Nothing is switched until the strength is chosen.
+    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, None);
+}
