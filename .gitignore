@@ -1,0 +1,33 @@
+# Rust / Cargo build output
+target/
+targetmwjDTO/
+**/target/
+**/targetmwjDTO/
+
+# Node / Bun dependencies
+node_modules/
+**/node_modules/
+.npm/
+.bun/
+
+# Built binaries (produced by build.ps1)
+dist/
+**/dist/
+
+# turbo cache written by the kernel build
+.turbo/
+**/.turbo/
+
+# Uncensored events written when the plugin runs from a source tree
+tui/grok-build/crates/codegen/openbuild-backend/uncensored/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Local logs and scratch output
+*.log
+.tmp/
+tmp/

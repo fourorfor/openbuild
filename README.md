@@ -1,252 +1,137 @@
 # OpenBuild
 
-把 **OpenBuild 内核** 接到 **Rust TUI** 上：TUI 仍然是原来的全屏界面、鼠标命中、滚动与选区，后端换成通过 **ACP over stdio** 运行的内核。
+一个**完整可运行**的 AI 编程 Agent：Rust 全屏 TUI 负责界面，Bun 内核负责会话、工具、权限、MCP 与模型调用。两个二进制通过 ACP over stdio 通信，打包成同一个产品对外使用。
 
 ```
-openbuild.exe (Rust TUI)
-        │  NDJSON / JSON-RPC 2.0 (ACP)
-        ▼
-openbuild-kernel.exe (Bun)
-        │  HTTP + SSE（本机回环）
-        ▼
-OpenBuild core（会话、工具、权限、MCP、Skill、模型）
+openbuild.exe          ← 你看到的界面（Rust TUI，全屏、鼠标、滚动、选区）
+      │  ACP over stdio
+      ▼
+openbuild-kernel.exe   ← 干活的那一层（Bun：会话、工具、权限、MCP、模型）
 ```
 
-本仓库是 `docs/openbuild-implementation-plan.md` 的落地实现：**M0 骨架 + M1 主链路 + M2 权限 + M3 会话/模型 + M4 压缩可见性 + M5 诊断**，并包含计划中的 **P1–P3 内核补丁**。M6 已落地主题导入、`/kernel`、子智能体接管桥接、ACP 服务端与 HTTP 直连；**E2 双内核并排（`/pane`）已落地**；H 无审查模式 **v2** 已落地（菜单、持久化默认、可编辑策略、provider 请求改写）；`question` 工具改用 `x.ai/ask_user_question` 扩展通道，不再误报 "The user dismissed this question"。
+它来自两个上游项目的再组合：内核基于 [opencode](https://github.com/anomalyco/opencode)（MIT），TUI 基于 grok-build（Apache-2.0）。OpenBuild 负责把它们接成一个能直接用的整体，并在此之上加了若干面向实际使用的增强。
 
-## 当前状态
+---
 
-已通过真实运行验证：
+## 30 秒上手
 
-- `openbuild-kernel.exe acp` 能响应 `initialize`，返回 `agentCapabilities`、9 个可用模型、3 个命令。
-- `session/new` 返回 `sessionId` 与 `configOptions`（model / effort / mode）；安装 H 插件后 mode 为 `build` / `plan` / `uncensored`。
-- Rust 侧子进程桥 `openbuild-backend` 能完成 `initialize → session/new` 往返。
-- `cargo test -p openbuild-backend --lib`：141 passed / 2 ignored（含子智能体、HTTP feed、H 插件安装器/配置 schema v2 与 E2 的 profile 槽位/隔离目录）。
-- 真实双内核（ptyctl）：`/pane open secondary` 后两个内核进程并存、两 pane 并排、左右各自返回
-  `FINAL-LEFT` / `FINAL-RIGHT`、`/backend` 按 pane 报 slot 0/1、secondary 拥有私有 `opencode.db`、
-  杀掉 secondary 只影响该 pane。
-- H 插件 Bun 单测：28 pass（v1 迁移、v2 校验、变体、热加载、provider 改写、`policySource` 三态）；真实内核 `plugin check` 对 managed 插件返回 `openbuild.uncensored (current)`，对坏插件返回 `check failed` 且 exit 1。
-- `cargo check -p xai-grok-pager`：通过；`/uncensored` 相关 lib 单测 20 pass。
-- `cargo build -p openbuild-server --release`：通过；`openbuild-server --version` → `openbuild-server 0.1.0`。
-- `bun run typecheck`（packages/cli）：通过（1,886 文件）。
-
-已实现的映射/补丁：
-
-| 项 | 内容 |
-| --- | --- |
-| P1 | 内核每条 `session/update` 在 **通知层** 注入 `promptId` / `turnStartMs` / `streamStartMs` / `eventId`；`session/load` 重放注入 `isReplay` |
-| P2 | `websearch` 的 `kind` 改为 `search`，title 改为 `Web search: <query>` |
-| P3 | `initialize` 返回 `_meta.modelState`（模型、上下文窗口、图片能力、effort）与 `availableCommands` |
-| G1 | `openbuild-backend`：profile / 子进程 transport / 工具名归一 / `todowrite`→`Plan` / shell 结构化输出 |
-| G3 | `connect()` 按 `OPENBUILD_BACKEND` 或同目录内核分派；`AgentLocation::Subprocess` |
-| G4 | 事件循环入口统一 `normalize_message`，不修改 3,011 行的 tracker |
-| M3 | `config` 模块把内核 `configOptions` 翻译成模型/effort/模式；`/model`、`/effort`、Shift+Tab 在子进程后端走 `session/set_config_option`；`config_option_update` 回写 `ModelState` |
-| M4 | `adapter/compaction` 把内核压缩标记翻译成 TUI 的 `x.ai/session_notification`，压缩过程与失败原因可见 |
-| M5 | 内核崩溃可见且可恢复：`health` 模块归集退出原因与 stderr，事件循环推系统块（退出码 + stderr 尾部），`/reconnect` 重启内核并对每个会话 `session/load` 重放；`/backend` 显示后端类型、内核路径与已声明能力 |
-| M6-D | `adapter/child.rs` 把内核子会话事件展开成 grok 的 `subagent_spawned` / `subagent_finished` 与按子会话 `sessionId` 重投递的更新，复用现有 `subagent_takeover` |
-| M6-F | `openbuild-server` crate：把内核作为 ACP agent 暴露给 Zed/Neovim 的 stdio 中继；`build.ps1` / `install.ps1` 已纳入 |
-| M6-G | HTTP 直连侧通道：ACP 之外只读订阅 `session.tool.progress` / `session.usage.updated`；diff 另走 `GET /api/session/:id/diff`（`session.diff` 不是 SSE 事件）；`/backend` 显示连接状态、事件数与最近事件 |
-| 品牌 | 全部用户可见名称统一走 `branding` 模块（`OpenBuild`）；crate 名、环境变量与 `~/.grok` 路径保持上游拼写 |
-
-### 品牌覆盖范围
-
-`OpenBuild` 出现在所有用户可见的位置：CLI 的 `--version` / `--help` / `version`、
-欢迎页、隐私横幅、设置弹窗、通知标题、`doctor` 报告、更新提示与更新通道输出、
-权限弹窗标题、`/backend` 输出。
-
-**故意保留上游拼写**的地方（改动会破坏兼容性）：
-
-| 保留项 | 原因 |
-| --- | --- |
-| crate 名（`xai-grok-*`） | 影响 `Cargo.toml` / 依赖图，与用户无关 |
-| 环境变量（`GROK_*`） | 用户脚本与 CI 已在用 |
-| `~/.grok` 目录 | 已有用户数据在此 |
-| `# >>> grok doctor >>>` 标记 | 写入用户 shell 配置的托管块标记，改动会导致历史块无法识别 |
-| `xAI.GrokBuild`（WinGet 包 ID） | 上游包标识 |
-| 模型名（`Grok 4.5` 等） | 模型标识，不是产品名 |
-| 主题名（`Grok Night` / `Grok Day`） | 主题标识 |
-
-## 目录
-
-```
-openbuild/
-├── README.md
-├── build.ps1              # 构建内核 + TUI + ACP 服务端，产出 dist/
-├── run.ps1                # 启动 TUI（自动指向 dist 内核）
-├── verify.ps1             # 后端单测 + 真实 ACP 握手
-├── dist/                  # openbuild.exe / openbuild-kernel.exe / openbuild-server.exe
-├── patches/               # 两个上游仓库的完整改动（24 个补丁，可复现）
-├── tests/                 # H 无审查插件的 Bun 单测
-├── vendor/opencode/       # 内核源码 @ b2526211ec
-└── tui/grok-build/        # TUI 源码 @ 2bdd1d6 + openbuild-backend + openbuild-server
-```
-
-`patches/` 里是 24 个按主题拆分的补丁（内核 11 个 + TUI 13 个），
-应用顺序与内容见 [`patches/README.md`](patches/README.md)。
-
-## 快速开始
-
-前置：Windows、PowerShell 7、Bun 1.4.4、Rust 1.94+、protoc 29.x。
+### 你已经装过
 
 ```powershell
-# 1) 构建（首次会安装依赖，耗时较长）
+openbuild
+```
+
+安装目录在 `%LOCALAPPDATA%\OpenBuild`，三个二进制（TUI、内核、ACP 服务端）都在那里。
+
+### 从源码跑
+
+需要：**Windows**、**PowerShell 7+**、**Bun 1.4.x**、**Rust 1.94+**、**protoc 29.x**。
+
+```powershell
+# 1) 构建三个二进制到 dist\
 .\build.ps1
 
-# 2) 启动
+# 2) 直接启动（自动指向 dist\ 里的内核）
 .\run.ps1
 ```
 
-`run.ps1` 会设置：
+`bun` 和 `protoc` 要在 PATH 里；不想改 PATH 就用环境变量指过去：
 
 ```powershell
-$env:OPENBUILD_BACKEND = "opencode"
-$env:OPENBUILD_KERNEL  = "<repo>\dist\openbuild-kernel.exe"
+$env:OPENBUILD_BUN = "C:\path\to\bun.exe"
+$env:PROTOC        = "C:\path\to\protoc.exe"
+.\build.ps1
 ```
 
-然后启动 `dist\openbuild.exe`。
-
-> 本工作区附带的 `dist\openbuild.exe` 是调试构建（已用 `editbin /STACK:33554432` 扩大主线程栈）；`build.ps1` 默认生成 release 构建。
+首次构建要装依赖并编译 Rust，耗时较长；之后是增量构建。
 
 ### 安装到本机（可选）
 
 ```powershell
 .\install.ps1              # 构建 + 安装
-.\install.ps1 -SkipBuild   # 直接安装 dist\ 里现有的产物
-.\install.ps1 -Update      # 从更新通道下载并安装（TUI 的 Ctrl+U 走这条）
+.\install.ps1 -SkipBuild   # 装 dist\ 里已有的产物
 ```
 
-安装到 `%LOCALAPPDATA%\OpenBuild`，并把该目录加入用户 PATH，之后任意终端里
-直接敲 `openbuild` 即可。内核与 TUI 放在同一目录，TUI 会自己找到它，
-不再需要设置 `OPENBUILD_KERNEL`。
+装到 `%LOCALAPPDATA%\OpenBuild`，并把这个目录加进用户 PATH。内核和 TUI 放同一目录，TUI 会自动找到内核，不需要再设 `OPENBUILD_KERNEL`。
 
-### 更新
+> **改完代码想生效**：重新 `.\build.ps1`，然后 `.\install.ps1 -SkipBuild`。只在 `dist\` 里编译、不重新安装的话，`openbuild` 命令跑的还是旧版本。
 
-OpenBuild 用**自己的**更新通道，不查上游 grok 的（那条会装成 grok 并覆盖
-`~/.grok/bin/grok.exe`）。通道默认**未配置即静默**：没有提示、不发请求。
+---
 
-```
-[update]
-base = "https://updates.example.com/openbuild"   # 版本指针：{base}/{channel}
-channel = "stable"
-install_script = "C:/OpenBuild/install.ps1"      # 实际执行安装的脚本
-```
+## 第一次运行
 
-也可用 `OPENBUILD_UPDATE_BASE` / `OPENBUILD_UPDATE_CHANNEL` /
-`OPENBUILD_INSTALL_SCRIPT` 覆盖。命令行：
+启动后直接打字提问即可。几个最常用的入口：
 
-```powershell
-openbuild update --check     # 只查是否有新版本
-openbuild update             # 下载并安装
-```
-
-### 只验证内核
-
-```powershell
-'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' |
-  .\dist\openbuild-kernel.exe acp
-```
-
-### 只验证 ACP 桥
-
-```powershell
-cd tui\grok-build
-$env:PROTOC = "<path-to-protoc.exe>"
-cargo run -p openbuild-backend --example handshake -- ..\..\dist\openbuild-kernel.exe ..\..
-```
-
-可选 `OPENBUILD_PROMPT="say hi"` 跑一轮 prompt。
-
-## 环境变量
-
-| 变量 | 作用 |
+| 想做什么 | 做法 |
 | --- | --- |
-| `OPENBUILD_BACKEND` | `opencode` 强制走子进程；`grok` 强制走原 grok shell；未设置时若同目录存在内核则自动走 opencode |
-| `OPENBUILD_KERNEL` | 内核可执行文件路径 |
-| `OPENBUILD_PROMPT` | 仅 handshake 示例使用：发送一轮 prompt |
-| `OPENBUILD_THEME_DIR` | 覆盖导入主题的存放目录（默认 `~/.grok/themes`） |
-| `OPENBUILD_PROFILE_ROOT` | `/pane` 各 profile 的私有根目录（默认 `~/.openbuild/profiles/<label>`） |
-| `OPENBUILD_HTTP_FEED` | 设为 `0` / `off` 可关闭只读 HTTP 事件侧通道（默认开启） |
-| `PROTOC` | 构建期 protoc 路径（Windows 必需） |
-| `OPENCODE_VERSION` | 构建内核时覆盖版本号（本仓库使用 `2.1.4`，避免 detached 版本触发 free-tier 门槛） |
+| 看当前后端、内核路径、连接状态 | `/backend` |
+| 换模型 / 换思考档位 | `/model`、`/effort` |
+| 切换 计划模式 / 自动批准 | `Shift+Tab`，或 `/plan`、`/always-approve` |
+| 新会话 / 恢复旧会话 | `/new`、`/resume` |
+| 内核崩了想拉起来 | `/reconnect` |
+| 看帮助 | `/help` |
 
-## 在 TUI 里查看后端
+第一次用建议先确认两件事：`/backend` 显示的后端是不是 `OpenCode`，以及当前模型是否可用。模型和 provider 的配置见下面「接入第三方模型」。
 
-输入 `/backend` 会打印当前后端、内核路径和已声明能力。能力决定菜单项是否存在：
-`config options` 关闭时模型/模式切换会退回 `session/set_model`，`queue extension`
-关闭时 `/queue` 不可用，等等。排查「某个功能不见了」时先看这里。
+---
 
-同一份输出还会显示 HTTP 直连侧通道的状态，例如：
+## 无审查模式（v7）
+
+一个**按会话生效**的内容策略模式：开启后，agent 不会因为话题本身拒绝、不说教、不加"这仅供教育用途"之类的免责声明。**工具权限、沙箱、文件系统边界完全不变**——它是内容策略开关，不是权限开关。
+
+### 用法
 
 ```text
-HTTP feed: connected (128 events, 0 dropped, 0 reconnects, last: session.tool.progress)
+/uncensored                 # 弹出菜单：开启 / 开启并记住 / 关闭 / 关闭并记住 / 状态
+/uncensored on              # 直接开启（之后选挂载哪些场景包）
+/uncensored off
+/uncensored status          # 看当前模式、模型、挂载的包、协议层状态
+/uncensored pack <id>       # 直接指定场景包，不弹菜单
 ```
 
-它连接的是 ACP 内核正在使用的那个 `serve` 进程，只读订阅 `/api/event`，
-用来补上 ACP 不携带的 `session.tool.progress` 与 `session.usage.updated`。
-连接失败只会让这行显示 `stopped` / `reconnecting`，不影响对话主链路。
+选「记住」会写盘，**之后的新会话默认按这个状态启动**。
 
-> **`session.diff` 不在这个流上。** 它只定义在 `packages/schema/src/v1/session.ts`
-> （`SessionV1.Event.Definitions`），没有进入 `EventManifest.ServerDefinitions`，
-> 内核也没有任何 publisher，所以 `/api/event` 永远不会下发它。
-> 要拿每轮的文件 diff，必须按需请求
-> `GET /api/session/:sessionID/diff?context=N`（返回 `FileDiff.Info[]`）。
-> `session.usage.recorded`（durable 旧形态）同理不在流上，只有 `session.usage.updated` 在。
+### 场景包
 
-## 双内核并排（`/pane`）
+v7 把提示词拆成"内核固定部分 + 可选场景包"，默认只加载固定部分（约 1.3 KB），按需叠加：
 
-`/pane open <label>` 会在同一个 TUI 里再拉起一个内核，两个 pane 左右并排，
-各自拥有独立的 transcript、composer 和会话数据库：
+| 包 | 内容 | 什么时候用 |
+| --- | --- | --- |
+| （不挂） | 固定的 actor + isolation 框架 | 默认，最省上下文 |
+| `web` | Web / API 安全测试 | 前后端渗透、接口越权 |
+| `binary` | 二进制、逆向、内存分析 | 脱壳、协议逆向 |
+| `anticheat` | 反作弊与检测机制研究 | 检测逻辑与绕过分析 |
+| `ctf` | CTF 赛题方向 | 夺旗题 |
+| `legacy-extended` | v6 的 84 KB 操作员全文 | 需要最强框架时（请求体积回到 v6 水平） |
 
-```text
-/profiles/<label>/
-├── config/               # OPENCODE_CONFIG_DIR
-├── share/opencode/       # XDG_DATA_HOME —— 自己的 opencode.db
-├── state/                # XDG_STATE_HOME
-└── cache/                # XDG_CACHE_HOME
-```
+`/uncensored pack web,ctf` 可以同时挂多个包。
 
-一个 profile 是**后端 + 模型 + 工作区**的完整组合；三者任一不同就是不同 profile。
-第二个 pane 默认跑在同一工作区，用私有 `OPENBUILD_PROFILE_ROOT` 隔离存储。
+### 和 v6 的区别
 
-| 命令 | 作用 |
-| --- | --- |
-| `/pane` 或 `/pane list` | 列出每个连接槽位的 profile、模型与焦点，并说明当前布局 |
-| `/pane open [label]` | 打开第二个 pane（label 只允许字母、数字、`-`、`_`） |
-| `/pane focus [left\|right\|next]` | 切换键盘焦点；也可以直接点击 pane |
-| `/pane close [label]` | 关闭指定的 secondary pane（不带 label 时关唯一的 secondary） |
+v6 是在插件里把约 90 KB 提示词追加到系统提示**末尾**；v7 把它移到内核请求构造处，只放约 1.3 KB 在系统提示**最前面**，并按需叠加场景包。同样一句话，v7 的固定开销约为 v6 的 1.4%。
 
-`/backend` 跟随焦点 pane：左 pane 报 primary（含 HTTP feed），右 pane 报
-`Pane: slot 1 · profile independent storage`。两个内核互不影响 ——
-杀掉一个只会让那一个 pane 显示 `This pane's kernel stopped`，另一个仍可继续工作。
+v7 还把这些能力做进了内核，不再依赖插件时机：
 
-## 作为 ACP 服务端使用（Zed / Neovim）
+- **请求体改写**：按 provider 深合并请求体（例如 Google 系关闭安全过滤项），不会覆盖你自己配的字段。
+- **拒绝历史改写**：上一轮模型拒绝了，下一轮请求里把它自己那条拒绝改写成同意，避免模型"保持前后一致"继续拒绝。只动尾部连续拒绝，带代码或工具调用的回答不动。
+- **重试预算**：一次会话内共享，不会因为换路径而重复计数。
+- **TUI 只做观测和展示**：状态行、`/uncensored status` 都读内核的结论。
 
-`openbuild-server.exe` 把内核包装成一个 ACP agent，走 stdio 与外部客户端通信。
-它自己拉起内核，所以只需要指向内核路径（默认找同目录的 `openbuild-kernel.exe`）：
+配置在 `<config>/uncensored.json`（v3），字段：`mode`、`packs`、`providerRules`、`providerBody`、`rewriteRefusalHistory`、`observeRefusals`、`refusalRetryBudget`、`model`。旧版 v1/v2 文件读取时自动映射，不需要手动改。
 
-```powershell
-.\dist\openbuild-server.exe --kernel .\dist\openbuild-kernel.exe --cwd .
-```
+> 说明：OpenBuild 保证自己不拒绝、不拦截、不说教。模型和 provider 仍可能拒绝——改写请求改变的是"发给模型的请求长什么样"，不是服务商服务端审核的判定结果。
 
-在 Zed / Neovim 的 ACP agent 配置里，把启动命令指向这个二进制即可。
-服务端转发 `initialize`、`session/*`、`prompt` / `cancel` 与权限请求；
-通知直接透传，不做 TUI 侧的渲染适配。
+---
 
-> 这是单客户端 stdio 中继：一个 server 进程对应一个外部客户端和一个内核。
-> 真实 Zed/Neovim 接入尚未做端到端验收。
+## 常用功能
 
-## 接入第三方模型提供商
+### 接入第三方模型
 
-内置模型之外的服务（OpenAI 兼容中转站、自建网关、Ollama / vLLM 本地推理、
-OpenRouter 等）通过内核配置文件接入，**不需要改 TUI**：
+内置模型之外的服务（OpenAI 兼容中转、自建网关、Ollama / vLLM 本地推理、OpenRouter 等）走配置文件接入，不用改 TUI。
 
 ```powershell
 notepad "$env:USERPROFILE\.config\opencode\openbuild.jsonc"
 ```
-
-> 文件名是 `openbuild.jsonc`（本分支已从 `opencode.jsonc` 改名），
-> 旧名仍兼容读取但优先级更低。把配置放到 `%USERPROFILE%\.config\openbuild\`
-> 也可以 —— TUI 启动时发现该目录存在就会自动指向它。
 
 ```jsonc
 {
@@ -274,212 +159,140 @@ notepad "$env:USERPROFILE\.config\opencode\openbuild.jsonc"
 
 两个最容易踩的坑：
 
-- **`activation: "enabled"` 不能省**。只写 `settings.apiKey` 而省略 `activation`
-  时 provider 会被静默隐藏（已实测）。
-- **删除 provider 不会立即生效**。内核常驻背景服务是单向热加载：新增立即出现，
-  删除仍会列出。要清掉旧条目跑 `openbuild-kernel service restart`。
+- **`activation: "enabled"` 不能省**。只写 `settings.apiKey` 会静默隐藏该 provider。
+- **删除 provider 不会立即生效**。内核是单向热加载：新增立即出现，删除需要 `openbuild-kernel service restart`（或 TUI 里 `/kernel restart`）。
 
-完整字段说明、各服务商配方、排错表见 [`docs/openbuild-providers.md`](../docs/openbuild-providers.md)。
+字段含义：`activation` 控制是否启用，`package` 指定协议适配器，`env` 列出存放密钥的环境变量，`settings` 原样传给该协议，`models` 声明模型清单与上下文窗口。
 
-## 主题：导入 opencode / VSCode 配色
+### 双内核并排（`/pane`）
 
-内置主题之外，可以直接导入外部主题文件。支持三种格式：
-
-| 格式 | 识别依据 | 例子 |
-| --- | --- | --- |
-| opencode TUI（v1） | 顶层 `theme` 对象 | `vendor/opencode/packages/theme/` 的 `*.json` |
-| opencode 桌面主题 | 顶层 `light` / `dark` + `palette` | `vendor/opencode/packages/ui/src/theme/themes/*.json` |
-| VSCode 主题 | 顶层 `colors` 对象 | 任意 VSCode `*-color-theme.json` |
+在同一个 TUI 里开第二个内核，左右分栏，各自有独立的会话、历史和数据库：
 
 ```text
-/theme import ~/themes/catppuccin.json    # 转换 + 保存 + 立即应用
-/theme list                               # 列出内置与已导入，标出当前生效的
-/theme catppuccin                         # 以后按 slug 切回
-/theme grokday                            # 切回内置主题（同时撤下导入覆盖）
+/pane open secondary      # 打开右侧 pane
+/pane focus right         # 切换焦点（也可以直接点）
+/pane close               # 关掉右侧
+/pane list                # 看每个 pane 的 profile、模型与焦点
 ```
 
-导入的主题落在 `~/.grok/themes/<slug>.json`，选择记录在 `~/.grok/themes/active`；
-两者都可用 `OPENBUILD_THEME_DIR` 改到别处。
+一个 profile = 后端 + 模型 + 工作区。第二个 pane 默认用私有存储目录隔离，杀掉一个不影响另一个。
 
-两个实现上的要点：
+### 插件与 MCP
 
-- **透明色会被合成到背景上**，而不是直接丢弃 alpha。VSCode 常用 `#RRGGBBAA`
-  表达叠层，丢 alpha 会把 10% 的红色叠层变成纯红，diff 行会看起来像报错。
-- **导入主题不新增 `ThemeKind` 变体**。`ThemeKind` 是 `Copy`、被十几处穷尽匹配、
-  并以 `as u8` 存进原子变量；导入主题改用一个运行时覆盖层（`theme::custom`）
-  叠在当前选中主题之上，渲染管线（对比度增强、量化、ANSI16 降级）完全复用。
-  代价是主题选择器里预览内置主题时会临时挂起覆盖层，否则每行看起来都一样。
-
-## 插件与 MCP：`/kernel`
-
-内核本身已有 `plugin` / `mcp` 子命令，TUI 不重复实现，直接调用并展示结果：
+内核自带 `plugin` / `mcp` 子命令，TUI 直接调用并展示结果：
 
 ```text
-/kernel                       # 同时列出插件与 MCP 服务器
-/kernel plugin list
-/kernel plugin add <package>
-/kernel plugin remove <name>
-/kernel mcp list
+/kernel                    # 列出插件与 MCP 服务器
+/kernel plugin add <pkg>
 /kernel mcp add <name> -- <command...>
 /kernel mcp add <name> --url <url>
-/kernel mcp remove <name>
-/kernel restart               # 重启内核服务，让「删除」生效
+/kernel restart            # 重启内核，让"删除"生效
 ```
 
-> **为什么需要 `/kernel restart`**：内核的常驻服务是单向热加载 —— 新增插件或
-> provider 立即生效，**删除不会**。这与 provider 的行为一致（见上一节）。
+### 主题
 
-内核可执行文件按 `OPENBUILD_KERNEL` → TUI 同目录 的顺序查找，与启动时一致。
-每个命令都有 120 秒超时保护：`plugin add` 可能要走网络，但内核卡死不应该连带卡住 TUI。
-
-## 内核崩溃与 `/reconnect`
-
-内核是一个独立进程。它意外退出时（任务管理器结束、崩溃、被系统回收）：
-
-1. 界面上出现一个系统块，写明「OpenBuild kernel exited with code N」，
-   并附上内核 stderr 的最后几行；
-2. 正在跑的轮次会被收回，输入框不会假装还在等待；
-3. 在修复原因后输入 `/reconnect`：TUI 会启动一个新的内核、重新握手，
-   并对每个打开的会话做一次 `session/load`，历史由内核重放回来。
-
-退出原因和 stderr 由 `openbuild-backend` 的 `health` 模块归集；TUI 主动退出
-不会被误报成崩溃（那种情况记为 `UserCancel`，直接退出）。
-
-也可以脱离 TUI 单独验证这条链路：
-
-```powershell
-cd tui\grok-build
-$env:PROTOC = "<path-to-protoc.exe>"
-cargo run -p openbuild-backend --example crash -- ..\..\dist\openbuild-kernel.exe ..\..
-```
-
-它会握手、杀掉内核、打印捕获到的退出码与 stderr，并额外验证「主动停止不算崩溃」。
-
-## 构建期修复（Windows）
-
-上游构建脚本有两处 Unix 假设，本仓库已修：
-
-1. `crates/build/xai-proto-build/src/lib.rs` 用 `/dev/stdout`、`/dev/null` 做 protoc 依赖输出；Windows 上改为临时文件。
-2. `Cargo.lock` 中 `cc 1.2.48` 在 Rust 1.94 / Windows 上类型不匹配；升级到 `cc 1.10.0`。
-
-## 已验证证据
-
-以下输出来自本机真实运行（Windows 11 / PowerShell 7 / Bun 1.4.4 / Rust 1.94.0）：
+支持 opencode TUI、opencode 桌面版、VSCode 三种主题格式：
 
 ```text
-opencode v2.1.4
-PROFILE BackendProfile { kind: OpenCode, ... child_session_updates: true, config_options: true, ext_queue: false ... }
-SESSION {"sessionId":"ses_...","configOptions":[{"id":"model",...},{"id":"effort",...},{"id":"mode",...}]}
-NOTIFY {"_meta":{"eventId":"ses_...-1","promptId":"openbuild-handshake-29200","streamStartMs":...,"turnStartMs":...},
-        "sessionId":"ses_...","update":{"sessionUpdate":"agent_message_chunk",
-        "content":{"type":"text","text":"Hi! 👋 ..."}}}
-PROMPT {"stopReason":"end_turn","usage":{"totalTokens":5252,...},"_meta":{}}
+/theme import ~/themes/catppuccin.json
+/theme list
+/theme catppuccin
+/theme grokday              # 切回内置
 ```
 
-- `cargo test -p openbuild-backend --lib`：141 passed / 2 ignored（含 `adapter::child`、HTTP feed、H 插件安装器与配置 schema v2 用例）。
-- `bun test openbuild/tests/uncensored-plugin.test.ts`：28 passed（v1 迁移、v2 校验、变体解析、标记去重、策略热加载、provider 改写、`policySource` 三态与 events 观测）。
-- `cargo run -p openbuild-backend --example crash`：`PASS kernel exit detected (code: Some(1))` + `PASS a user stop stays a user stop`。
-- `cargo build -p openbuild-server --release`：Finished；`openbuild-server --version` → `openbuild-server 0.1.0`。
-- `cargo run -p openbuild-server --example relay -- <kernel> <cwd>`：`INITIALIZE agent=OpenCode` → `SESSION ses_...` → `PROMPT stopReason=EndTurn updates=3` → PASS。
-- `cargo test -p xai-grok-pager-render`：1,163 passed / 31 failed（共 1,194，31 个均为 Windows 平台差异，与改动前逐条一致）。
-- `cargo test -p xai-grok-update`：137 passed。
-- `cargo check -p xai-grok-pager`：Finished。
-- `bun run typecheck`（packages/cli）：No type errors in 1,886 files。
-- `cargo test -p xai-grok-pager --lib`：上一轮基线 **10,101 passed / 104 failed**（失败集合与改动前逐条一致，全部为 Windows 平台差异，见「已知限制」）；本轮新增的 `/uncensored`、`/uncensored-edit`、`refusal_probe` 测试单独跑过（`uncensored` 20 pass）。跑之前必须设 `OPENBUILD_KERNEL` 指向真实内核，否则会多一个环境依赖失败（10,100 / 105）。
-- 内核 `bun test packages/cli/test/acp`：121 pass / 1 skip / 6 fail（6 个失败为 Windows 基线：subprocess 与 cold-start 超时类，回退本轮内核改动后仍为同样 6 条）。
-- 内核 `--version`：`opencode v2.1.4`（内核自身版本号沿用上游标识，不影响 UI 品牌）。
-- TUI `--version`：`openbuild 1.0.45`。
+### 作为 ACP 服务端接入 Zed / Neovim
+
+`openbuild-server.exe` 把内核包装成标准 ACP agent，走 stdio：
+
+```powershell
+.\dist\openbuild-server.exe --kernel .\dist\openbuild-kernel.exe --cwd .
+```
+
+把外部客户端的 ACP 启动命令指向它即可。这是单客户端中继：一个 server 进程对应一个客户端和一个内核。
+
+---
+
+## 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `OPENBUILD_BACKEND` | `opencode` 强制走子进程内核；`grok` 走原 grok shell；不设时若同目录有内核则自动走 opencode |
+| `OPENBUILD_KERNEL` | 内核可执行文件路径 |
+| `OPENBUILD_PROFILE_ROOT` | `/pane` 各 profile 的私有根目录（默认 `~/.openbuild/profiles/<label>`） |
+| `OPENBUILD_THEME_DIR` | 导入主题的存放目录（默认 `~/.grok/themes`） |
+| `OPENBUILD_HTTP_FEED` | 设为 `0` 关闭只读 HTTP 事件侧通道 |
+| `OPENBUILD_UPDATE_BASE` / `_CHANNEL` / `_VERSION` | 自更新通道设置 |
+| `OPENBUILD_BUN` / `PROTOC` | 构建期工具路径 |
+| `OPENCODE_VERSION` | 构建内核时覆盖版本号（本仓库用 `2.1.4`） |
+
+---
+
+## 验证与排错
+
+### 一条命令跑完主要检查
+
+```powershell
+.\verify.ps1
+```
+
+它会跑后端单测、无审查插件单测、真实 ACP 握手。
+
+### 只验证内核能起来
+
+```powershell
+'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' |
+  .\dist\openbuild-kernel.exe acp
+```
+
+### 界面里某个功能不见了
+
+先看 `/backend`。它打印后端类型、内核路径和内核声明的能力，菜单项是否出现由能力决定：`config options` 关闭时模型切换会退回旧路径，`queue extension` 关闭时没有 `/queue`。
+
+### 内核崩了
+
+界面会出现系统块写明退出码和内核 stderr 尾部，输入框不会假装还在等。修好原因后 `/reconnect` 重启内核并重放会话历史。
+
+### 构建期注意事项
+
+上游两处 Unix 假设已在本仓库修好：
+
+1. protoc 依赖输出原本写 `/dev/stdout`、`/dev/null`，Windows 上改为临时文件。
+2. `Cargo.lock` 里 `cc` 升到 1.10.0，否则在 Rust 1.94 / Windows 上类型不匹配。
+
+---
+
+## 项目结构
+
+```text
+openbuild/
+├── README.md
+├── build.ps1             # 构建内核 + TUI + ACP 服务端 → dist/
+├── run.ps1               # 启动 TUI，自动指向 dist/ 里的内核
+├── verify.ps1            # 后端单测 + 插件单测 + 真实 ACP 握手
+├── install.ps1           # 安装到本机并加入 PATH
+├── dist/                 # 构建产物（不进仓库）
+├── tests/                # 无审查插件的 Bun 单测
+├── vendor/opencode/      # 内核源码
+└── tui/grok-build/       # TUI 源码 + openbuild-backend + openbuild-server
+```
+
+两棵 vendored 源码树不是我们的仓库。它们基于固定上游基线（opencode `b2526211ec`、grok-build `2bdd1d6`），改动已经直接落在这棵树里，克隆下来即可构建，不需要额外打补丁。
+
+---
 
 ## 已知限制
 
-- **权限弹窗**只提供「一次性 / 总是 / 拒绝」三选一。内核的权限模型是 action/resource 规则，
-  与 grok 的「命令词高亮」不同构，因此「允许这条命令」的精细行不显示。
-- **压缩摘要**只显示开始/完成/失败，不带 token 前后对比（内核不在标记里给这两个数）。
-- **子智能体 takeover** 的桥接层已有单测；真实 `task` 会话的观感仍需人工验收一次。
-- **HTTP feed 的 UI 消费**尚未做：`/backend` 能看到连接状态与事件计数，但 `session.diff`
-  还没有 diff 视图，完整 usage 也还没有用量面板。
-- **ACP 服务端**是单客户端 stdio 中继；relay 示例已覆盖 initialize / session/new / prompt，
-  但 Zed/Neovim 客户端接入尚未实测。
-- **交互式 TUI 的 PTY 级验收**：J1（杀内核 → 提示 → `/reconnect` → 恢复）
-  已用仓库自带的 `ptyctl` 在真实 release 二进制上通过；上游
-  `xai-grok-pager-pty-harness` 在 Windows 上仍不可用（零字节屏幕），但不再是
-  验收阻塞项。证据：`.yanagent/evidence/openbuild/manual-j1-20261028.md`。
-  B1/B3/C1/D2/E2 等其余人工项仍待补。
-- **Windows 上的上游测试失败**：`cargo test -p xai-grok-pager --lib` 有 104 个用例失败，
-  全部与本次改动无关，按根因分为：
-  - `InputOutcome::Changed` 断言（15）：依赖 Unix 终端按键解码。
-  - 路径断言（`CwdNotAbsolute`、`file://`、`/tmp/...`、`Temp\.tmpXXX` 与 `plugin-source` 比较）：
-    集中在 `app::dispatch`、`app::agent_view`、`scrollback`、`diagnostics::fix`。
-  - `PlatformUnsupported`（2）与 `sh`/`printf` 缺失（4，`notifications::hooks`）。
-  - 其余为 Ctrl+i 快捷键表、`doctor`/`git_info`/`disk_usage` 的 Unix 命令输出差异。
+- **权限弹窗**只有「一次性 / 总是 / 拒绝」三选一，没有按命令词的精细允许。
+- **压缩摘要**只显示开始 / 完成 / 失败，不带前后 token 对比。
+- **HTTP 直连侧通道**已连接并可见（`/backend` 有事件计数），但还没有 diff 视图和用量面板。
+- **ACP 服务端**是单客户端 stdio 中继，relay 示例覆盖了 initialize / session/new / prompt，Zed / Neovim 真实客户端接入未做端到端验收。
+- **Windows 上的上游测试**有一批与本次改动无关的失败（Unix 终端按键解码、路径断言、`sh`/`printf` 缺失等），按根因分类记录在验证输出里。
 
-  品牌相关模块全部通过：`views::welcome` 105、`views::settings_modal` 190、
-  `views::privacy_banner` 5、`branding` 2、`notifications::protocol` 14。
-
-## H 无审查模式（v2）
-
-默认关闭、按会话生效的内容策略模式。开启后 agent 不因内容本身拒绝、不说教、
-不附加免责声明；工具权限、沙箱与系统边界不变。
-
-- `/uncensored`（无参数）弹出选项菜单：`On` / `On + remember` / `Off` / `Off + remember` /
-  `Edit policy` / `Status` / `Cancel`。选带 remember 的项会写盘，之后新会话默认按该状态开启
-  （徽标带 `*` 表示"默认开启"）。
-- `/uncensored on|off|status` 快速路径仍然可用。
-- 状态行出现 `无审查` 徽标，与 `YOLO` / `计划` 并列；权限轴独立。
-- `stopReason=refusal` 显示为 `TurnRefused` 警告终态，提示 `/model` 换模型或改
-  provider 后重发，不再静默显示"完成"。
-- 插件源码内嵌在 `openbuild-backend`，启动时写入内核实际读取的配置目录
-  （`OPENCODE_CONFIG_DIR`、已有的 `~/.config/openbuild` 或 `~/.config/opencode`）
-  的 `plugin/openbuild-uncensored.ts`；managed 副本自动升级，用户文件不覆盖。
-- `/kernel plugin check` 可查看本地插件是 `current` 还是 `check failed`。
-- 配置 `<config>/uncensored.json` 为 schema v2：`version` / `enabled` / `scope` / `variant` /
-  `model` / `fallbackModel` / `inheritSubagents` / `refusalRetry`（`off` / `once` / `once+rewrite`）/
-  `textRefusalProbe`（`off` / `observe` / `retry-once`）/ `policyPlacement` / `policySource`
-  （`compact` / `hybrid`；已退休的 `hanshuang`、`full` 仍可读并映射到 `hybrid`）/ `stripChatTemplateMarker` /
-  `policyExtendedSha256` / `providerRewrite`（`on` / `auto` / `off`）/ `providerRewriteBody` /
-  `stripRefusalHistory`（默认 `true`）/ `refusalRetryBudget`（默认 `2`，范围 0–10）。v1 三键文件自动迁移并备份。
-- 拒绝恢复有两层：重试前先把模型**自己上一条拒绝**静默改写成同意（`stripRefusalHistory`，
-  只作用于尾部连续拒绝，含代码的答案不动；中文拒绝换中文同意，英文换英文），再用可配置预算重试
-  （`refusalRetryBudget`）。这是降拒绝率最有效的单点：模型看到自己刚拒绝过时会保持自洽，
-  换成"我已同意"后它就没有可自洽的拒绝立场。
-- 策略分层：`<config>/uncensored/policy.md`（用户）> 变体文件（追加，不替换）> 内置
-  `policy.default.md`；插件每轮按 mtime+size 检查，改文件**不重启内核**即生效。
-  `policySource=hybrid` 时，用户 `policy.md` 改为**叠加**在内核之上而不是替换它。
-- 只有两个策略模式，由 `/uncensored` 菜单选择并写入配置：
-  - `compact`（默认）：`policy.default.md` ≈ 5 KB，包含隔离工作区框架（目标都是本地产物、
-    操作者已授权、无工作区外影响）+ 操作契约 + 工件优先闸门 + 卡住处理。上下文成本最低。
-  - `hybrid`：内核之上再追加 `policy.extended.md`（85,976 B 的操作员全文，含红蓝轨道细节）。
-    框架最强，但每轮多付约 2 万 token，且 CTF 语境会稀释普通编码任务的指令密度。
-- L2.6 `policy.extended.md` 来自 `aimeoa/hanshuang-codex@cf9c153` 的 `memory/破甲记忆.md`，
-  本地仅做 CRLF→LF 归一，并**移除激活词握手**：正文不再包含任何激活词，加载即生效。
-  署名与上游/本地 sha256 见 `plugin/NOTICE-extended.txt`。
-- `/uncensored-edit` 已移除。模式开关走 `/uncensored`：`on` 之后弹出 compact / hybrid 选择，
-  选中即持久化 `policySource` 并切换会话。
-- 升级迁移：安装器删除**仍为原样**的旧 `policy.full.md` 与 `NOTICE-dsh-purge.txt`，
-  并把 `policy.hanshuang.md` / `NOTICE-hanshuang.txt` 改名为当前文件名；用户改过的副本保留，不会静默丢策略。
-
-未做：`--uncensored` 启动旗标、viewer/reconcile 自动重试。
-OpenBuild 只保证自己不改写、不拦截、不说教；模型/提供商仍可能拒绝，
-策略正文改变的是请求长什么样，不是服务端语义审核的判定结果。
-设计见 [`docs/openbuild-uncensored-mode.md`](../docs/openbuild-uncensored-mode.md)，
-本轮实现依据见 [`docs/openbuild-question-and-uncensored-v2.md`](../docs/openbuild-question-and-uncensored-v2.md)。
-
-## 路线图（未实现）
-
-以下功能已有设计但**尚未落地**，不要按已交付能力使用：
-
-- **E 的后续打磨**（下一步）：分割比例入口、按 profile 固定初始模型、支持多于两个 pane。
-  E2 双内核本身已交付（`/pane`）。
-- **G 的 UI 消费**（下一步）：diff 视图与内核 token 用量面板。
-  注意 `session.diff` **不在** HTTP feed 上，必须走 `GET /api/session/:id/diff`。
-- **H 的 `--uncensored` 启动旗标**：需要独立 deferred backend mode；v2 的其余项已完成。
-
-完整优先级见 [`docs/openbuild-enhancements.md`](../docs/openbuild-enhancements.md)，
-逐步实施方案见 [`docs/openbuild-handoff-e2-polish-g.md`](../docs/openbuild-handoff-e2-polish-g.md)。
+---
 
 ## 许可证
 
 - 内核（源自 opencode）：MIT
 - TUI（源自 grok-build）：Apache-2.0
 
-分发时保留两份 LICENSE 与 `THIRD-PARTY-NOTICES`。
+分发时保留两份 LICENSE 与 `THIRD-PARTY-NOTICES.md`。
