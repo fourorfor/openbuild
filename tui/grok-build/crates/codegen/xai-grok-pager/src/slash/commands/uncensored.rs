@@ -36,7 +36,7 @@ impl SlashCommand for UncensoredCommand {
     fn suggest_args(
         &self,
         _ctx: &crate::slash::command::AppCtx,
-        _args_query: &str,
+        args_query: &str,
     ) -> Option<Vec<ArgItem>> {
         let item = |display: &str, description: &str| ArgItem {
             display: display.to_string(),
@@ -44,6 +44,24 @@ impl SlashCommand for UncensoredCommand {
             insert_text: display.to_string(),
             description: description.to_string(),
         };
+        let query = args_query.trim();
+        // Enter accepts the highlighted row by replacing the whole args range, so
+        // a row offered for text that is already a valid command would rewrite it
+        // on submit. `pack anticheat` is complete: offering `pack` there would
+        // turn the line into `/uncensored pack` and silently clear the packs.
+        if valid_invocation(query) {
+            return None;
+        }
+        if let Some(rest) = query.strip_prefix("pack") {
+            let rest = rest.trim_start();
+            return Some(
+                openbuild_backend::plugin::PACK_IDS
+                    .iter()
+                    .filter(|id| id.starts_with(rest))
+                    .map(|id| item(id, pack_description(id)))
+                    .collect(),
+            );
+        }
         Some(vec![
             item("on", "Switch this session to the direct content policy"),
             item("off", "Return this session to the build agent"),
@@ -90,6 +108,38 @@ impl SlashCommand for UncensoredCommand {
     }
 }
 
+/// True when `args` already names something `run` would act on, so the args menu
+/// has nothing left to complete.
+fn valid_invocation(args: &str) -> bool {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some(rest) = trimmed.strip_prefix("pack") {
+        let rest = rest.trim();
+        return rest.is_empty()
+            || rest
+                .split([',', ' '])
+                .filter(|item| !item.is_empty())
+                .all(|item| openbuild_backend::plugin::PACK_IDS.contains(&item));
+    }
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "on" | "off" | "status"
+    )
+}
+
+fn pack_description(id: &str) -> &'static str {
+    match id {
+        "web" => "Web and API security testing",
+        "binary" => "Binary, reverse engineering and memory analysis",
+        "anticheat" => "Anti-cheat detection logic and bypass research",
+        "ctf" => "Capture-the-flag tasks",
+        "legacy-extended" => "The retired 84 KB operator prompt (v6 request size)",
+        _ => "Scene pack",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +158,21 @@ mod tests {
             pane_workspace: None,
             pane_connection: None,
             pager_state: PagerLocalSnapshot::default(),
+        }
+    }
+
+    fn app_ctx(models: &ModelState) -> crate::slash::command::AppCtx<'_> {
+        crate::slash::command::AppCtx {
+            models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         }
     }
 
@@ -152,6 +217,41 @@ mod tests {
                 CommandResult::Action(Action::ShowUncensoredStatus)
             ));
         }
+    }
+
+    /// A complete argument must not offer a completion row: Enter accepts the
+    /// highlighted row by replacing the whole args range, so offering `pack`
+    /// for `pack anticheat` rewrote the line to `/uncensored pack` on submit and
+    /// cleared the packs the user had just named.
+    #[test]
+    fn a_complete_argument_offers_no_completion() {
+        let models = ModelState::default();
+        let context = app_ctx(&models);
+        for args in [
+            "pack anticheat",
+            "pack web,ctf",
+            "pack",
+            "on",
+            "off",
+            "status",
+        ] {
+            assert!(
+                UncensoredCommand.suggest_args(&context, args).is_none(),
+                "{args:?} is complete and must not offer a row"
+            );
+        }
+    }
+
+    /// A partial `pack` query completes to pack ids, not to the word `pack`.
+    #[test]
+    fn a_partial_pack_query_completes_to_ids() {
+        let models = ModelState::default();
+        let context = app_ctx(&models);
+        let rows = UncensoredCommand
+            .suggest_args(&context, "pack anti")
+            .expect("partial query offers rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].insert_text, "anticheat");
     }
 
     #[test]
