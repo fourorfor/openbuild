@@ -6,13 +6,16 @@ import { Money } from "@opencode/schema/money"
 import { Session } from "@opencode/schema/session"
 import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { Location } from "@opencode/core/location"
+import { Model } from "@opencode/core/model"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Project } from "@opencode/core/project"
+import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
+import { SessionProtocolPolicy } from "@opencode/core/session/protocol-policy"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
-import { DateTime, Effect, Stream } from "effect"
+import { DateTime, Effect, Layer, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
@@ -55,7 +58,8 @@ describe("SessionModelRequest HTTP hooks", () => {
           seen.push({ hook: "response", kind: event.kind, agent: event.agent })
         }),
       )
-      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
+        Effect.provide(SessionProtocolPolicy.testLayer))
 
       for (const kind of KINDS) {
         const prepared = yield* requests[kind]({
@@ -94,7 +98,8 @@ describe("SessionModelRequest HTTP hooks", () => {
           event.request.headers.set("x-plugin", "kept")
         }),
       )
-      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
+        Effect.provide(SessionProtocolPolicy.testLayer))
       const prepared = yield* requests.primary({
         session,
         agent: Agent.ID.make("build"),
@@ -138,7 +143,8 @@ describe("SessionModelRequest HTTP hooks", () => {
           input.required.push("extra")
         }),
       )
-      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
+        Effect.provide(SessionProtocolPolicy.testLayer))
       const inputSchema = { type: "object", properties: { id: { type: "string" } }, required: ["id"] }
       const tools = {
         definitions: [new ToolDefinition({ name: "lookup", description: "Lookup", inputSchema })],
@@ -209,6 +215,7 @@ describe("SessionModelRequest HTTP hooks", () => {
       })
       const requests = yield* SessionModelRequest.Service.pipe(
         Effect.provide(SessionModelRequest.layer),
+        Effect.provide(SessionProtocolPolicy.testLayer),
         Effect.provideService(SessionModelTransport.Service, websocketTransport),
       )
       const prepared = yield* requests.primary({
@@ -235,6 +242,100 @@ describe("SessionModelRequest HTTP hooks", () => {
         "send:primary:create",
         "receive:primary:created",
       ])
+    }),
+  )
+})
+
+describe("SessionModelRequest protocol policy", () => {
+  const policyLayer = (config: Parameters<typeof SessionProtocolPolicy.layerWith>[0]) =>
+    SessionModelRequest.layer.pipe(
+      Layer.provide(SessionProtocolPolicy.layerWith(config)),
+      Layer.provide(Layer.succeed(SessionModelTransport.Service, transport)),
+    )
+
+  it.effect("prefixes the actor and isolation parts before the base prompt", () =>
+    Effect.gen(function* () {
+      const requests = yield* SessionModelRequest.Service.pipe(
+        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+      )
+      const prepared = yield* requests.primary({
+        session,
+        agent: Agent.ID.make("uncensored"),
+        model,
+        system: [{ type: "text", text: "base prompt" }],
+        messages: [],
+      })
+      const texts = prepared.request.system.map((part) => part.text)
+      expect(texts[0]!.startsWith(SessionProtocolPolicy.ACTOR_MARKER)).toBe(true)
+      expect(texts[1]!.startsWith(SessionProtocolPolicy.ISOLATION_MARKER)).toBe(true)
+      expect(texts[2]).toBe("base prompt")
+    }),
+  )
+
+  it.effect("leaves every other agent untouched", () =>
+    Effect.gen(function* () {
+      const requests = yield* SessionModelRequest.Service.pipe(
+        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+      )
+      const prepared = yield* requests.primary({
+        session,
+        agent: Agent.ID.make("build"),
+        model,
+        system: [{ type: "text", text: "base prompt" }],
+        messages: [],
+      })
+      expect(prepared.request.system.map((part) => part.text)).toEqual(["base prompt"])
+      expect(prepared.request.http?.body).toBeUndefined()
+    }),
+  )
+
+  it.effect("writes no body overlay when the mode is off", () =>
+    Effect.gen(function* () {
+      const requests = yield* SessionModelRequest.Service.pipe(
+        Effect.provide(policyLayer(SessionProtocolPolicy.DEFAULTS)),
+      )
+      const prepared = yield* requests.primary({
+        session,
+        agent: Agent.ID.make("uncensored"),
+        model: SessionRunnerModel.resolved(OpenAIChat.route.model({ id: "gpt-5.5", provider: "google" }), {
+          capabilities: { tools: true, input: ["text"], output: ["text"] },
+          cost: [],
+          limit: { context: 200_000, output: 32_000 },
+        }),
+        system: [{ type: "text", text: "base prompt" }],
+        messages: [],
+      })
+      expect(prepared.request.system.map((part) => part.text)).toEqual(["base prompt"])
+      expect(prepared.request.http?.body).toBeUndefined()
+    }),
+  )
+
+  it.effect("writes the Gemini safety overlay for google providers", () =>
+    Effect.gen(function* () {
+      const requests = yield* SessionModelRequest.Service.pipe(
+        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+      )
+      const prepared = yield* requests.primary({
+        session,
+        agent: Agent.ID.make("uncensored"),
+        model: {
+          ...SessionRunnerModel.resolved(OpenAIChat.route.model({ id: "gpt-5.5", provider: "google" }), {
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+            cost: [],
+            limit: { context: 200_000, output: 32_000 },
+          }),
+          // `OpenAIChat.route` pins `provider: "openai"`, so the route model does not
+          // carry the Google identity the overlay keys on. Override the catalog ref
+          // with branded IDs to exercise the google rule table.
+          ref: Model.Ref.make({ providerID: Provider.ID.make("google"), id: Model.ID.make("gpt-5.5") }),
+        },
+        system: [],
+        messages: [],
+      })
+      const settings = prepared.request.http?.body?.safetySettings as Array<{ category: string; threshold: string }>
+      expect(settings).toHaveLength(4)
+      expect(settings.every((entry) => entry.threshold === "BLOCK_NONE")).toBe(true)
+      expect(settings.map((entry) => entry.category)).not.toContain("HARM_CATEGORY_CIVIC_INTEGRITY")
     }),
   )
 })

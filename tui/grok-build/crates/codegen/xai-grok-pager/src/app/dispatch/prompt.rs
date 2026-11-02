@@ -1943,41 +1943,31 @@ pub(super) fn handle_prompt_response(
             None
         };
 
-        // A refusal in uncensored mode gets exactly one continuation retry. The
-        // retry is sent directly so it runs before locally queued prompts; the
-        // next turn end clears `uncensored_retry_pending`, so a second refusal
-        // only shows the marker.
+        // v7: the kernel owns the refusal decision and the shared retry budget.
+        // It rewrites the transcript copy before the next request and, when the
+        // budget allows, sends one framed continuation itself. The TUI therefore
+        // only observes: it records the verdict for later review and never sends
+        // a second prompt of its own, which is what used to double-count.
         let config = openbuild_backend::plugin::uncensored_config();
-        let retry_effect = if crate::app::turn_completion::should_retry_refusal(
-            &config,
-            refusal,
-            retry_turn,
-            agent.uncensored_mode_effective(),
-            had_pending_adoption,
-        ) && let Some(session_id) = agent.session.session_id.clone()
-        {
-            let retry_prompt_id = uuid::Uuid::new_v4().to_string();
-            agent.uncensored_retry_pending = true;
-            agent.note_self_originated_prompt(&retry_prompt_id);
+        let observe = agent.uncensored_mode_effective() && config.observe_refusals;
+        if observe && refusal {
+            openbuild_backend::plugin::append_uncensored_event(
+                "refusal_verdict",
+                &format!(
+                    "verdict=typed retry_turn={retry_turn} budget={}",
+                    config.refusal_retry_budget
+                ),
+            );
             agent.scrollback.push_block(RenderBlock::system(
-                "Model/provider refused. Uncensored mode is retrying once. \
-                 If it refuses again, switch /model or provider.",
+                "Kernel refusal verdict: typed (provider content filter). \
+                 The kernel applied the shared retry budget; the transcript copy is rewritten before the next request.",
             ));
-            Some(Effect::SendPrompt {
-                agent_id,
-                session_id,
-                text: crate::app::turn_completion::refusal_retry_text(&config).to_string(),
-                prompt_id: retry_prompt_id,
-                skill_token_ranges: Vec::new(),
-            })
-        } else {
-            None
-        };
-
-        // L4: a provider that answers "I can't help with that" ends the turn
-        // normally, so `stopReason` never says refusal. The probe needs three
-        // agreeing signals; `observe` only records, `retry-once` also retries.
-        let probe_effect = if retry_effect.is_none() && agent.uncensored_mode_effective() {
+        }
+        // Text-level refusals end the turn normally, so `stopReason` never says
+        // refusal. The probe stays as a read-only observation: it records what it
+        // saw and never sends a prompt, because the kernel already judged the
+        // same message and owns the retry.
+        if observe && !refusal {
             let text = agent.scrollback.last_turn_agent_text();
             let probe = crate::app::refusal_probe::ProbeInput {
                 config: &config,
@@ -1992,30 +1982,13 @@ pub(super) fn handle_prompt_response(
             };
             match crate::app::refusal_probe::evaluate(probe) {
                 crate::app::refusal_probe::ProbeVerdict::Hit => {
-                    let retry = crate::app::refusal_probe::should_retry(probe, crate::app::refusal_probe::ProbeVerdict::Hit);
                     openbuild_backend::plugin::append_uncensored_event(
-                        if retry { "probe_hit_retry" } else { "probe_hit_observe" },
-                        &format!("chars={} retries={}", text.chars().count(), agent.uncensored_probe_retries),
+                        "refusal_verdict",
+                        &format!("verdict=text chars={}", text.chars().count()),
                     );
-                    agent.scrollback.push_block(RenderBlock::system(if retry {
-                        "Uncensored probe: the answer looks like a refusal. Retrying once with a direct frame."
-                    } else {
-                        "Uncensored probe: the answer looks like a refusal (observe only; /uncensored-edit --disable-probe turns this off)."
-                    }));
-                    if retry && let Some(session_id) = agent.session.session_id.clone() {
-                        let retry_prompt_id = uuid::Uuid::new_v4().to_string();
-                        agent.uncensored_probe_retries = agent.uncensored_probe_retries.saturating_add(1);
-                        agent.note_self_originated_prompt(&retry_prompt_id);
-                        Some(Effect::SendPrompt {
-                            agent_id,
-                            session_id,
-                            text: crate::app::turn_completion::refusal_retry_text(&config).to_string(),
-                            prompt_id: retry_prompt_id,
-                            skill_token_ranges: Vec::new(),
-                        })
-                    } else {
-                        None
-                    }
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "Kernel refusal verdict: text (observe only). The kernel rewrites this message in the next request's transcript.",
+                    ));
                 }
                 crate::app::refusal_probe::ProbeVerdict::Skip => {
                     // Record why the probe stayed out of the way, so a turn that
@@ -2030,25 +2003,14 @@ pub(super) fn handle_prompt_response(
                             probe.typed_refusal
                         ),
                     );
-                    None
                 }
             }
-        } else {
-            None
-        };
+        }
 
-        let (page_flip_entry, mut effects) = if retry_effect.is_some() || probe_effect.is_some() {
-            (adopted_page_flip, Vec::new())
-        } else {
+        let (page_flip_entry, mut effects) = {
             let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
             (adopted_page_flip.or(drain.page_flip_entry), drain.effects)
         };
-        if let Some(effect) = retry_effect {
-            effects.push(effect);
-        }
-        if let Some(effect) = probe_effect {
-            effects.push(effect);
-        }
 
         // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion (the stale one was wiped above)
         // It fetches only after a clean, non-bash agent turn that leaves the session idle with an empty prompt and no queued work, local or server-side

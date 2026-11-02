@@ -1723,12 +1723,12 @@ fn translate_local_submit(
             InputOutcome::Action(Action::UncensoredAnswered { on, remember })
         }
         LocalQuestionKind::UncensoredPolicyMenu => {
-            let mode = match *idx {
-                0 => openbuild_backend::plugin::PolicySource::Compact,
-                1 => openbuild_backend::plugin::PolicySource::Hybrid,
+            let legacy_extended = match *idx {
+                0 => false,
+                1 => true,
                 _ => return InputOutcome::Changed,
             };
-            InputOutcome::Action(Action::UncensoredPolicyAnswered { mode })
+            InputOutcome::Action(Action::UncensoredPolicyAnswered { legacy_extended })
         }
     }
 }

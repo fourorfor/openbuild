@@ -4,6 +4,10 @@
 //! `off` returns to `build`. It never changes the permission mode (ask / auto /
 //! YOLO) and cannot override a provider's own content filter.
 //!
+//! v7 adds `pack <id>` for the optional scene bodies. The policy itself is
+//! injected by the kernel, so this command only switches the agent and edits
+//! the config the kernel reads.
+//!
 //! `/uncensored` and `/uncensored status` print the current mode, model, and
 //! installed plugin state; the dispatcher owns the session and plugin reads.
 
@@ -16,11 +20,11 @@ impl SlashCommand for UncensoredCommand {
     slash_meta! {
         name: "uncensored",
         description: "Toggle direct content policy (OpenBuild does not refuse)",
-        usage: "/uncensored [on|off|status]",
+        usage: "/uncensored [on|off|status|pack <id>]",
         takes_args: true,
         args_required: false,
         session_scoped: true,
-        arg_placeholder: "[on|off|status]",
+        arg_placeholder: "[on|off|status|pack <id>]",
     }
 
     /// The mode is provided by the OpenBuild kernel plugin; the grok shell has
@@ -44,11 +48,35 @@ impl SlashCommand for UncensoredCommand {
             item("on", "Switch this session to the direct content policy"),
             item("off", "Return this session to the build agent"),
             item("status", "Show mode, model, and plugin state"),
+            item("pack", "Mount scene packs: web, binary, anticheat, ctf, legacy-extended"),
         ])
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        match args.trim().to_ascii_lowercase().as_str() {
+        let trimmed = args.trim();
+        // `/uncensored pack <id>` (and `pack` alone to clear) mounts scene packs.
+        if let Some(rest) = trimmed.strip_prefix("pack") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return CommandResult::Action(Action::SetUncensoredPacks { packs: Vec::new() });
+            }
+            let packs: Vec<String> = rest
+                .split([',', ' '])
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect();
+            if let Some(unknown) = packs
+                .iter()
+                .find(|pack| !openbuild_backend::plugin::PACK_IDS.contains(&pack.as_str()))
+            {
+                return CommandResult::Error(format!(
+                    "Unknown pack: {unknown}. Available: {}",
+                    openbuild_backend::plugin::PACK_IDS.join(", ")
+                ));
+            }
+            return CommandResult::Action(Action::SetUncensoredPacks { packs });
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
             // No argument opens the menu: the point of v2 is that the user can
             // see and change the mode without remembering the flags.
             "" => CommandResult::Action(Action::OpenUncensoredMenu),
@@ -56,7 +84,7 @@ impl SlashCommand for UncensoredCommand {
             "on" => CommandResult::Action(Action::OpenUncensoredPolicyMenu),
             "off" => CommandResult::Action(Action::SetUncensoredMode(false)),
             other => CommandResult::Error(format!(
-                "Unknown /uncensored argument: {other}. Use on, off, status, or no argument for the menu."
+                "Unknown /uncensored argument: {other}. Use on, off, status, pack <id>, or no argument for the menu."
             )),
         }
     }
@@ -133,6 +161,47 @@ mod tests {
         let mut context = ctx(&models, &bundle);
         match UncensoredCommand.run(&mut context, "maybe") {
             CommandResult::Error(message) => assert!(message.contains("on, off, status")),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    /// `/uncensored pack` replaces the mounted packs; a bare `pack` clears them
+    /// so the request returns to the protocol-only size.
+    #[test]
+    fn pack_selects_and_clears_scene_bodies() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut context = ctx(&models, &bundle);
+        match UncensoredCommand.run(&mut context, "pack anticheat") {
+            CommandResult::Action(Action::SetUncensoredPacks { packs }) => {
+                assert_eq!(packs, vec!["anticheat".to_string()]);
+            }
+            other => panic!("expected SetUncensoredPacks, got {other:?}"),
+        }
+        let mut context = ctx(&models, &bundle);
+        match UncensoredCommand.run(&mut context, "pack web,ctf") {
+            CommandResult::Action(Action::SetUncensoredPacks { packs }) => {
+                assert_eq!(packs, vec!["web".to_string(), "ctf".to_string()]);
+            }
+            other => panic!("expected SetUncensoredPacks, got {other:?}"),
+        }
+        let mut context = ctx(&models, &bundle);
+        match UncensoredCommand.run(&mut context, "pack") {
+            CommandResult::Action(Action::SetUncensoredPacks { packs }) => assert!(packs.is_empty()),
+            other => panic!("expected an empty SetUncensoredPacks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_pack_is_rejected_with_the_list() {
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut context = ctx(&models, &bundle);
+        match UncensoredCommand.run(&mut context, "pack nope") {
+            CommandResult::Error(message) => {
+                assert!(message.contains("Unknown pack"));
+                assert!(message.contains("legacy-extended"));
+            }
             other => panic!("expected an error, got {other:?}"),
         }
     }

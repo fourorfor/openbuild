@@ -13,6 +13,7 @@ import { SessionEvent } from "../event.js"
 import { SessionInbox } from "../inbox.js"
 import { SessionHistory } from "../history.js"
 import { SessionModelRequest } from "../model-request.js"
+import { SessionProtocolPolicy } from "../protocol-policy.js"
 import { SessionModelTransport } from "../model-transport.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
@@ -50,6 +51,7 @@ const layer = Layer.effect(
     const plugins = yield* Plugin.Service
     const title = yield* SessionTitle.Service
     const steps = yield* SessionStep.make
+    const policy = yield* SessionProtocolPolicy.Service
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
 
@@ -347,6 +349,17 @@ const layer = Layer.effect(
           RecoverFull: Effect.fnUntraced(function* () {
             recoverContinuation = false
           }),
+          Refused: Effect.fn("SessionRunner.retryRefusal")(function* () {
+            // One decision point: the kernel reads the shared budget and either
+            // sends one framed continuation or lets the refusal stand. The TUI
+            // only renders the verdict.
+            const remaining = yield* policy.refusalBudget(sessionID)
+            if (remaining <= 0) return false
+            yield* policy.spendRefusal(sessionID)
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: policy.retryText })
+            assistantMessageID = SessionMessage.ID.create()
+            return true
+          }),
         })
         if (completed !== undefined) return completed
       }
@@ -422,6 +435,7 @@ export const node = makeLocationNode({
     SessionModelTransport.node,
     SessionStore.node,
     SessionCompaction.node,
+    SessionProtocolPolicy.node,
     Plugin.node,
     SessionTitle.node,
     Snapshot.node,

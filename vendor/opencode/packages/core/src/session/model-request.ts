@@ -33,6 +33,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { Tool } from "../tool.js"
 import { SessionAffinity } from "./affinity.js"
 import { SessionModelTransport } from "./model-transport.js"
+import { SessionProtocolPolicy } from "./protocol-policy.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
@@ -227,6 +228,7 @@ export const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
+    const policy = yield* SessionProtocolPolicy.Service
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
@@ -274,6 +276,17 @@ export const layer = Layer.effect(
       const generation = Object.fromEntries(entries.filter(([k]) => GENERATION_KEYS.has(k))) as GenerationOptionsFields
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = SessionAffinity.get(session)
+      // L1: the actor and isolation parts go before the base prompt, so a later
+      // plugin append or a user policy file cannot outrank them.
+      const system = yield* policy.enrich({ agent: input.agent, parts: shaped.system })
+      // L2: a refusal left in the transcript is what the next turn stays
+      // consistent with. Rewriting happens on the transcript copy only.
+      const rewritten = yield* policy.rewriteRefusals({ agent: input.agent, messages: shaped.messages })
+      // L0: provider body overlay. `undefined` keeps the request byte-identical.
+      const body = yield* policy.bodyOverlay({
+        providerID: model.ref.providerID,
+        existing: model.model.defaults?.http?.body,
+      })
       const base = LLM.request({
         model: model.model,
         http: {
@@ -288,12 +301,13 @@ export const layer = Layer.effect(
             "x-opencode-session": affinity,
             "x-opencode-client": app.name,
           },
+          ...(body === undefined ? {} : { body }),
         },
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
-        system: shaped.system,
-        messages: boundImages(unsupportedParts(shaped.messages, model.capabilities, model.model.provider)),
+        system,
+        messages: boundImages(unsupportedParts(rewritten.messages, model.capabilities, model.model.provider)),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -421,5 +435,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, SessionProtocolPolicy.node],
 })

@@ -270,16 +270,14 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     lines.extend(policy_lines(&config));
     lines.extend(provider_lines(&config));
     lines.push(format!(
-        "Retry: {} · probe: {} · probe budget: {} · inherited by subagents: {}",
-        config.refusal_retry.as_str(),
-        config.text_refusal_probe.as_str(),
+        "Retry: budget {} (kernel-owned, shared by typed and text refusals) · inherited by subagents: {}",
         config.refusal_retry_budget,
         if config.inherit_subagents { "yes" } else { "no" }
     ));
     lines.push(format!(
         "Refusal history rewrite: {}",
         if config.strip_refusal_history {
-            "on (the model's own last refusal is removed before each request)"
+            "on (kernel rewrites the transcript copy; the stored message is untouched)"
         } else {
             "off"
         }
@@ -298,60 +296,41 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// The `Policy`/`Policy source`/`Marker` block of `/uncensored status`.
+/// The `Protocol`/`Policy` block of `/uncensored status`.
+///
+/// v7 reports the kernel pipeline instead of an injected body size: the actor
+/// part is a fixed kernel string, and the only variable is which packs are
+/// mounted. The retired extended body is now one of those packs.
 fn policy_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<String> {
-    use openbuild_backend::plugin::PolicySource;
-    let status = openbuild_backend::plugin::policy_status(config);
-    let path = status
-        .path
-        .as_ref()
-        .map(|path| path.display().to_string())
+    let path = openbuild_backend::plugin::effective_config_dir()
+        .map(|dir| openbuild_backend::plugin::uncensored_policy_path(&dir).display().to_string())
         .unwrap_or_else(|| "<no config directory>".to_string());
     let variant = if config.variant == "auto" {
         "variant auto".to_string()
     } else {
         format!("variant {}", config.variant)
     };
-    let mut lines = vec![format!(
-        "Policy: {path} (rev {} · {variant})",
-        config.policy_rev
-    )];
-    match status.source {
-        PolicySource::Compact => lines.push("Policy source: compact kernel (default)".to_string()),
-        PolicySource::Hybrid => {
-            let sha = status
-                .body_sha256
-                .as_deref()
-                .map(|sha| sha[..sha.len().min(12)].to_string())
-                .unwrap_or_else(|| "<missing>".to_string());
-            let file = status
-                .body_path
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("policy.extended.md");
-            lines.push(format!(
-                "Policy source: {} ({file}, {} bytes, sha256 {sha})",
-                status.source.label(),
-                status.body_bytes
-            ));
-            if status.body_bytes == 0 {
-                lines.push(
-                    "Policy body: missing; run OpenBuild once to install policy.extended.md"
-                        .to_string(),
-                );
-            } else if !status.body_intact {
-                lines.push("Policy body: modified from the bundled copy (kept; not overwritten)".to_string());
-            }
-            lines.push(format!(
-                "Marker: {}",
-                if status.strip_marker {
-                    "stripped (line 1 removed at injection; file on disk unchanged)"
-                } else {
-                    "kept (--keep-marker)"
-                }
-            ));
-        }
+    let packs = if config.packs.is_empty() {
+        "packs=none".to_string()
+    } else {
+        format!("packs={}", config.packs.join(","))
+    };
+    let mut lines = vec![
+        format!(
+            "Protocol: actor+isolation+history v7 · {packs} · L0={} · L3=budget {}/{} · observe={}",
+            config.provider_rewrite.as_str(),
+            config.refusal_retry_budget,
+            config.refusal_retry_budget,
+            if config.observe_refusals { "on" } else { "off" },
+        ),
+        format!("Policy: {path} (rev {} · {variant})", config.policy_rev),
+    ];
+    if config.packs.iter().any(|pack| pack == "legacy-extended") {
+        let status = openbuild_backend::plugin::policy_status(config);
+        lines.push(format!(
+            "Pack legacy-extended: {} bytes (mounting it returns the request to the v6 size)",
+            status.body_bytes
+        ));
     }
     lines
 }
@@ -459,8 +438,8 @@ pub(super) fn open_uncensored_menu(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// The second step after `/uncensored on`: pick which policy body plays the
-/// base role. Kept as its own modal so switching the mode and choosing its
+/// The second step after `/uncensored on`: pick which optional packs are
+/// mounted. Kept as its own modal so switching the mode and choosing its
 /// strength are separate decisions the operator can see.
 pub(super) fn open_uncensored_policy_menu(app: &mut AppView) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
@@ -500,16 +479,16 @@ pub(super) fn open_uncensored_policy_menu(app: &mut AppView) -> Vec<Effect> {
     };
     let options = vec![
         option(
-            "Compact (Recommended)",
-            "Short operating kernel plus the isolation frame; lightest on context",
+            "Protocol only (Recommended)",
+            "Kernel actor + isolation + refusal history; ~1.3 KB per request",
         ),
         option(
-            "Hybrid",
-            "That kernel plus the full operator prompt; strongest framing, ~20k tokens per turn",
+            "Protocol + legacy-extended",
+            "Adds the retired 84 KB operator prompt; back to the v6 request size",
         ),
     ];
     let question = Question {
-        question: "Which policy mode should uncensored use?".to_string(),
+        question: "Which packs should uncensored mount?".to_string(),
         id: None,
         options,
         multi_select: Some(false),
@@ -527,22 +506,49 @@ pub(super) fn open_uncensored_policy_menu(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Apply a policy-mode answer: persist the choice, then switch the session on.
+/// Apply a pack answer: persist the choice, then switch the session on.
 ///
-/// Persisting first means a later session starts with the same strength without
+/// Persisting first means a later session starts with the same packs without
 /// asking again. A write failure is reported but does not block the switch,
 /// because the session can still run with whatever the config already had.
-pub(super) fn uncensored_policy_answered(
-    app: &mut AppView,
-    mode: openbuild_backend::plugin::PolicySource,
-) -> Vec<Effect> {
+pub(super) fn uncensored_policy_answered(app: &mut AppView, legacy_extended: bool) -> Vec<Effect> {
+    let packs: Vec<&str> = if legacy_extended {
+        vec!["legacy-extended"]
+    } else {
+        Vec::new()
+    };
     match openbuild_backend::plugin::update_uncensored_config(|document| {
-        document.insert("policySource".into(), serde_json::json!(mode.as_str()));
+        document.insert("packs".into(), serde_json::json!(packs));
     }) {
-        Ok(_) => app.show_toast(&format!("Policy mode: {}", mode.label())),
-        Err(error) => app.show_toast(&format!("Could not save the policy mode: {error}")),
+        Ok(_) => app.show_toast(if legacy_extended {
+            "Packs: legacy-extended (request returns to the v6 size)"
+        } else {
+            "Packs: none (protocol only)"
+        }),
+        Err(error) => app.show_toast(&format!("Could not save the packs: {error}")),
     }
     set_uncensored_mode(app, true)
+}
+
+/// Apply a `/uncensored pack` argument: replace the mounted packs and report
+/// the resulting request size, so mounting the retired body is a visible choice.
+pub(super) fn set_uncensored_packs(app: &mut AppView, packs: Vec<&str>) -> Vec<Effect> {
+    let document_packs: Vec<String> = packs.iter().map(|pack| (*pack).to_string()).collect();
+    match openbuild_backend::plugin::update_uncensored_config(|document| {
+        document.insert("packs".into(), serde_json::json!(document_packs));
+    }) {
+        Ok(_) => {
+            if packs.contains(&"legacy-extended") {
+                app.show_toast("Packs: legacy-extended (request returns to the v6 size)");
+            } else if packs.is_empty() {
+                app.show_toast("Packs: none (protocol only)");
+            } else {
+                app.show_toast(&format!("Packs: {}", packs.join(",")));
+            }
+        }
+        Err(error) => app.show_toast(&format!("Could not save the packs: {error}")),
+    }
+    show_uncensored_status(app)
 }
 
 /// Apply a menu answer: switch the session, then optionally persist the default.

@@ -33,8 +33,8 @@ use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_j
 use super::modes::{
     dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
     open_uncensored_menu, open_uncensored_policy_menu, set_permission_mode, set_plan_mode,
-    set_uncensored_mode, set_yolo_mode, show_uncensored_status, uncensored_answered,
-    uncensored_policy_answered,
+    set_uncensored_mode, set_uncensored_packs, set_yolo_mode, show_uncensored_status,
+    uncensored_answered, uncensored_policy_answered,
 };
 use super::notes::{
     dispatch_enter_remember_mode, dispatch_open_feedback_modal,
@@ -1277,8 +1277,14 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::UncensoredAnswered { on, remember } => uncensored_answered(app, on, remember),
         Action::OpenUncensoredMenu => open_uncensored_menu(app),
         Action::OpenUncensoredPolicyMenu => open_uncensored_policy_menu(app),
-        Action::UncensoredPolicyAnswered { mode } => uncensored_policy_answered(app, mode),
+        Action::UncensoredPolicyAnswered { legacy_extended } => {
+            uncensored_policy_answered(app, legacy_extended)
+        }
         Action::ShowUncensoredStatus => show_uncensored_status(app),
+        Action::SetUncensoredPacks { packs } => {
+            let ids: Vec<&str> = packs.iter().map(String::as_str).collect();
+            set_uncensored_packs(app, ids)
+        }
         Action::OpenProviderSetup => dispatch_open_provider_setup(app),
         Action::ShowProviderStatus => dispatch_show_provider_status(app),
         Action::RemoveProvider(id) => dispatch_remove_provider(app, &id),

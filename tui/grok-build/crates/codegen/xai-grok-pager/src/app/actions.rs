@@ -741,12 +741,16 @@ pub enum Action {
     /// Open the policy-mode step directly, for `/uncensored on`: the user already
     /// said "on", so only the strength is left to choose.
     OpenUncensoredPolicyMenu,
-    /// Apply a policy-mode answer from the second `/uncensored` step.
+    /// Apply a pack answer from the second `/uncensored` step.
     UncensoredPolicyAnswered {
-        mode: openbuild_backend::plugin::PolicySource,
+        legacy_extended: bool,
     },
     /// Show `/uncensored status`: mode, model, and installed plugin state.
     ShowUncensoredStatus,
+    /// `/uncensored pack <id>`: replace the mounted scene packs.
+    SetUncensoredPacks {
+        packs: Vec<String>,
+    },
     /// `/login`: open the third-party provider setup wizard.
     OpenProviderSetup,
     /// `/login status`: show providers this wizard configured.

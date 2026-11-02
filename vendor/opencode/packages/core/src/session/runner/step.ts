@@ -39,6 +39,8 @@ export type Outcome = Data.TaggedEnum<{
   RecoverFull: {}
   Compacted: {}
   OutputLimit: { readonly needsContinuation: boolean }
+  /** The provider ended with `content-filter`; the runner decides whether a retry fits the budget. */
+  Refused: {}
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
 
@@ -275,6 +277,11 @@ export const make = Effect.gen(function* () {
         }
         if (tools.interrupted && tools.failure) return yield* Effect.failCause(tools.failure)
         if (tools.interrupted && Exit.isFailure(joined)) return yield* Effect.failCause(joined.cause)
+        // A content filter is the provider's typed refusal. It is reported as an
+        // outcome before the generic failure branch so the runner can apply the
+        // one shared budget; the Step.Failed event has already been published, so
+        // the TUI still sees the refusal when the budget is spent.
+        if (record.finish?.finish === "content-filter") return Outcome.Refused()
         if (record.failure) return yield* new StepFailedError({ error: record.failure })
         const needsContinuation = input.prepared.request.toolChoice?.type !== "none" && record.needsContinuation
         if (record.finish?.finish === "length") return Outcome.OutputLimit({ needsContinuation })

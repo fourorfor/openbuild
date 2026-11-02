@@ -2796,13 +2796,12 @@ fn uncensored_status_reports_mode_and_plugin() {
     assert!(text.contains("Uncensored mode: on"), "{text}");
     assert!(text.contains("Plugin:"), "{text}");
     assert!(text.contains("Config:"), "{text}");
-    assert!(text.contains("refusal_retry="), "{text}");
+    assert!(text.contains("Protocol: actor+isolation+history v7"), "{text}");
     // The status names the provider-side limits instead of implying more.
     assert!(text.contains("server-side semantic moderation unaffected"), "{text}");
     assert!(text.contains("may still refuse"), "{text}");
     assert!(text.contains("Policy:"), "{text}");
-    assert!(text.contains("Retry:"), "{text}");
-    assert!(text.contains("probe budget:"), "{text}");
+    assert!(text.contains("Retry: budget"), "{text}");
     assert!(text.contains("Refusal history rewrite: on"), "{text}");
 }
 
@@ -2876,12 +2875,9 @@ fn menu_cancel_turns_the_mode_off_without_remembering() {
 }
 
 #[test]
-fn policy_menu_rows_map_to_compact_and_hybrid() {
+fn policy_menu_rows_map_to_protocol_and_legacy_pack() {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
-    for (index, expected) in [
-        (0usize, openbuild_backend::plugin::PolicySource::Compact),
-        (1, openbuild_backend::plugin::PolicySource::Hybrid),
-    ] {
+    for (index, expected) in [(0usize, false), (1, true)] {
         let mut app = test_app_with_agent();
         dispatch(Action::OpenUncensoredMenu, &mut app);
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -2893,8 +2889,10 @@ fn policy_menu_rows_map_to_compact_and_hybrid() {
             LocalQuestionKind::UncensoredPolicyMenu,
             false,
         ) {
-            crate::app::app_view::InputOutcome::Action(Action::UncensoredPolicyAnswered { mode }) => {
-                assert_eq!(mode, expected);
+            crate::app::app_view::InputOutcome::Action(Action::UncensoredPolicyAnswered {
+                legacy_extended,
+            }) => {
+                assert_eq!(legacy_extended, expected);
             }
             other => panic!("expected UncensoredPolicyAnswered, got {other:?}"),
         }

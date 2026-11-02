@@ -22,7 +22,7 @@ pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
 pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "6";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "7";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -544,7 +544,39 @@ impl ProviderRewrite {
 }
 
 /// Current `uncensored.json` schema version.
-pub const UNCENSORED_CONFIG_VERSION: u64 = 2;
+pub const UNCENSORED_CONFIG_VERSION: u64 = 3;
+
+/// Which protocol layers the kernel runs for the `uncensored` agent.
+///
+/// v7 moved the injection, the transcript rewrite and the retry into the
+/// kernel; `off` is the escape hatch that leaves only the agent registration,
+/// so a request from this mode is byte-identical to one without it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UncensoredMode {
+    #[default]
+    Protocol,
+    Off,
+}
+
+impl UncensoredMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Protocol => "protocol",
+            Self::Off => "off",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "protocol" => Some(Self::Protocol),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// A pack is an optional body mounted after the kernel's actor part.
+pub const PACK_IDS: &[&str] = &["web", "binary", "anticheat", "ctf", "legacy-extended"];
 
 /// Parsed optional configuration for the managed uncensored plugin.
 ///
@@ -562,7 +594,6 @@ pub struct UncensoredConfig {
     /// `"auto"` or a variant id; `auto` resolves from the provider id.
     pub variant: String,
     pub model: Option<String>,
-    pub fallback_model: Option<String>,
     pub inherit_subagents: bool,
     pub refusal_retry: RefusalRetry,
     pub text_refusal_probe: TextRefusalProbe,
@@ -571,7 +602,7 @@ pub struct UncensoredConfig {
     pub strip_chat_template_marker: bool,
     pub policy_extended_sha256: Option<String>,
     pub provider_rewrite: ProviderRewrite,
-    /// Key = real provider id, value = fields shallow-merged into the request body.
+    /// Key = real provider id, value = fields deep-merged into the request body.
     pub provider_rewrite_body: serde_json::Map<String, serde_json::Value>,
     pub policy_rev: u64,
     pub policy_sha256: Option<String>,
@@ -579,7 +610,13 @@ pub struct UncensoredConfig {
     pub strip_refusal_history: bool,
     /// Automatic refusal retries one session may spend.
     pub refusal_retry_budget: u64,
-    /// A v1 file was read and has not been rewritten as v2 yet.
+    /// v3: which protocol layers the kernel runs.
+    pub mode: UncensoredMode,
+    /// v3: optional pack ids mounted after the actor part.
+    pub packs: Vec<String>,
+    /// v3: whether the TUI only renders kernel verdicts.
+    pub observe_refusals: bool,
+    /// A v1 file was read and has not been rewritten as v3 yet.
     pub migrated: bool,
     pub error: Option<String>,
 }
@@ -593,7 +630,6 @@ impl Default for UncensoredConfig {
             scope: UncensoredScope::NewSessions,
             variant: "auto".to_string(),
             model: None,
-            fallback_model: None,
             inherit_subagents: false,
             refusal_retry: RefusalRetry::Off,
             text_refusal_probe: TextRefusalProbe::Off,
@@ -607,6 +643,9 @@ impl Default for UncensoredConfig {
             policy_sha256: None,
             strip_refusal_history: true,
             refusal_retry_budget: 2,
+            mode: UncensoredMode::Protocol,
+            packs: Vec::new(),
+            observe_refusals: true,
             migrated: false,
             error: None,
         }
@@ -684,6 +723,11 @@ pub fn uncensored_policy_legacy_full_path(config_dir: &Path) -> PathBuf {
 
 pub fn uncensored_variants_dir(config_dir: &Path) -> PathBuf {
     uncensored_dir(config_dir).join("variants")
+}
+
+/// `<config>/uncensored/packs`, where the optional scene bodies live.
+pub fn uncensored_packs_dir(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("packs")
 }
 
 pub fn uncensored_history_dir(config_dir: &Path) -> PathBuf {
@@ -773,6 +817,32 @@ pub fn uncensored_config_in(config_dir: Option<&Path>) -> UncensoredConfig {
     }
 }
 
+/// Keys a v3 file may carry. The v2 spellings stay readable through
+/// [`CONFIG_KEYS_V2`] so an upgrade keeps the operator's choices.
+const CONFIG_KEYS_V3: &[&str] = &[
+    "version",
+    "enabled",
+    "scope",
+    "mode",
+    "packs",
+    "variant",
+    "model",
+    "inheritSubagents",
+    "inherit_subagents",
+    "providerRules",
+    "provider_rules",
+    "providerBody",
+    "provider_body",
+    "rewriteRefusalHistory",
+    "rewrite_refusal_history",
+    "observeRefusals",
+    "observe_refusals",
+    "refusalRetryBudget",
+    "refusal_retry_budget",
+    "policyRev",
+    "policy_rev",
+];
+
 const CONFIG_KEYS_V2: &[&str] = &[
     "version",
     "enabled",
@@ -851,8 +921,15 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
         ));
     }
     let legacy = version.is_none() || version == Some(1);
+    let v2 = version == Some(2);
 
-    let allowed: &[&str] = if legacy { CONFIG_KEYS_V1 } else { CONFIG_KEYS_V2 };
+    let allowed: &[&str] = if legacy {
+        CONFIG_KEYS_V1
+    } else if v2 {
+        CONFIG_KEYS_V2
+    } else {
+        CONFIG_KEYS_V3
+    };
     let unknown: Vec<&str> = object
         .keys()
         .filter(|key| !allowed.contains(&key.as_str()))
@@ -863,7 +940,10 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
     }
 
     let model = optional_model(object.get("model"), "model")?;
-    let fallback_model = optional_model(
+    // `fallbackModel` is retired in v3. A v2 file still parses, but the value
+    // is dropped: it never had a consumer, and switching models silently
+    // changes the cache prefix, the context window and the cost.
+    let _fallback_model = optional_model(
         alias_value(object, "fallbackModel", "fallback_model")?,
         "fallbackModel",
     )?;
@@ -925,7 +1005,6 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
         scope,
         variant,
         model,
-        fallback_model,
         inherit_subagents,
         refusal_retry,
         text_refusal_probe: enum_alias(
@@ -970,26 +1049,30 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
         )?),
         provider_rewrite: enum_alias(
             object,
-            "providerRewrite",
-            "provider_rewrite",
+            if v2 { "providerRewrite" } else { "providerRules" },
+            if v2 { "provider_rewrite" } else { "provider_rules" },
             ProviderRewrite::parse,
             "\"auto\" or \"off\"",
         )?
         .unwrap_or_default(),
-        provider_rewrite_body: match alias_value(object, "providerRewriteBody", "provider_rewrite_body")? {
+        provider_rewrite_body: match if v2 {
+            alias_value(object, "providerRewriteBody", "provider_rewrite_body")?
+        } else {
+            alias_value(object, "providerBody", "provider_body")?
+        } {
             None => serde_json::Map::new(),
             Some(serde_json::Value::Object(map)) => map
                 .iter()
                 .map(|(key, value)| {
                     if !value.is_object() {
                         return Err(format!(
-                            "providerRewriteBody.{key} must be a JSON object of request fields"
+                            "providerBody.{key} must be a JSON object of request fields"
                         ));
                     }
                     Ok((key.clone(), value.clone()))
                 })
                 .collect::<Result<serde_json::Map<String, serde_json::Value>, String>>()?,
-            Some(_) => return Err("providerRewriteBody must be a JSON object".to_string()),
+            Some(_) => return Err("providerBody must be a JSON object".to_string()),
         },
         policy_rev: match alias_value(object, "policyRev", "policy_rev")? {
             None => 0,
@@ -1001,8 +1084,8 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
         policy_sha256: optional_string_alias(object, "policySha256", "policy_sha256")?,
         strip_refusal_history: boolean_alias(
             object,
-            "stripRefusalHistory",
-            "strip_refusal_history",
+            if v2 { "stripRefusalHistory" } else { "rewriteRefusalHistory" },
+            if v2 { "strip_refusal_history" } else { "rewrite_refusal_history" },
         )?
         .unwrap_or(true),
         refusal_retry_budget: match alias_value(object, "refusalRetryBudget", "refusal_retry_budget")? {
@@ -1015,7 +1098,39 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
                 return Err("refusalRetryBudget must be an integer between 0 and 10".to_string())
             }
         },
-        migrated: false,
+        migrated: v2,
+        mode: match object.get("mode") {
+            None => UncensoredMode::Protocol,
+            Some(serde_json::Value::String(text)) => UncensoredMode::parse(text)
+                .ok_or_else(|| format!("mode must be \"protocol\" or \"off\", got {text:?}"))?,
+            Some(_) => return Err("mode must be a string".to_string()),
+        },
+        packs: match object.get("packs") {
+            None if v2 => {
+                // v2 `policySource: "hybrid"` becomes the opt-in pack.
+                let source = object
+                    .get("policySource")
+                    .or_else(|| object.get("policy_source"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("compact");
+                if matches!(source, "hybrid" | "hanshuang" | "full") {
+                    vec!["legacy-extended".to_string()]
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+            Some(serde_json::Value::Array(entries)) => entries
+                .iter()
+                .map(|entry| match entry.as_str() {
+                    Some(text) if PACK_IDS.contains(&text) => Ok(text.to_string()),
+                    _ => Err(format!("packs contains an unknown pack: {entry}")),
+                })
+                .collect::<Result<Vec<String>, String>>()?,
+            Some(_) => return Err("packs must be an array of pack ids".to_string()),
+        },
+        observe_refusals: boolean_alias(object, "observeRefusals", "observe_refusals")?
+            .unwrap_or(true),
         ..Default::default()
     })
 }
@@ -1153,21 +1268,16 @@ pub fn remember_uncensored_in(
         "version": UNCENSORED_CONFIG_VERSION,
         "enabled": enabled,
         "scope": scope.as_str(),
+        "mode": existing.mode.as_str(),
+        "packs": existing.packs,
         "variant": variant.unwrap_or(existing.variant.as_str()),
         "model": existing.model,
-        "fallbackModel": existing.fallback_model,
         "inheritSubagents": existing.inherit_subagents,
-        "refusalRetry": existing.refusal_retry.as_str(),
-        "textRefusalProbe": existing.text_refusal_probe.as_str(),
-        "policyPlacement": existing.policy_placement.as_str(),
-        "policySource": existing.policy_source.as_str(),
-        "stripChatTemplateMarker": existing.strip_chat_template_marker,
-        "policyExtendedSha256": existing.policy_extended_sha256,
-        "providerRewrite": existing.provider_rewrite.as_str(),
-        "providerRewriteBody": existing.provider_rewrite_body,
+        "providerRules": existing.provider_rewrite.as_str(),
+        "providerBody": existing.provider_rewrite_body,
+        "rewriteRefusalHistory": existing.strip_refusal_history,
+        "observeRefusals": existing.observe_refusals,
         "policyRev": existing.policy_rev,
-        "policySha256": existing.policy_sha256,
-        "stripRefusalHistory": existing.strip_refusal_history,
         "refusalRetryBudget": existing.refusal_retry_budget,
     });
     write_config_atomic(&path, &document)?;
@@ -1201,56 +1311,30 @@ pub fn update_uncensored_config_in(
     document.insert("version".into(), serde_json::json!(UNCENSORED_CONFIG_VERSION));
     document.insert("enabled".into(), serde_json::json!(existing.enabled));
     document.insert("scope".into(), serde_json::json!(existing.scope.as_str()));
+    document.insert("mode".into(), serde_json::json!(existing.mode.as_str()));
+    document.insert("packs".into(), serde_json::json!(existing.packs));
     document.insert("variant".into(), serde_json::json!(existing.variant));
     document.insert("model".into(), serde_json::json!(existing.model));
-    document.insert(
-        "fallbackModel".into(),
-        serde_json::json!(existing.fallback_model),
-    );
     document.insert(
         "inheritSubagents".into(),
         serde_json::json!(existing.inherit_subagents),
     );
     document.insert(
-        "refusalRetry".into(),
-        serde_json::json!(existing.refusal_retry.as_str()),
-    );
-    document.insert(
-        "textRefusalProbe".into(),
-        serde_json::json!(existing.text_refusal_probe.as_str()),
-    );
-    document.insert(
-        "policyPlacement".into(),
-        serde_json::json!(existing.policy_placement.as_str()),
-    );
-    document.insert(
-        "policySource".into(),
-        serde_json::json!(existing.policy_source.as_str()),
-    );
-    document.insert(
-        "stripChatTemplateMarker".into(),
-        serde_json::json!(existing.strip_chat_template_marker),
-    );
-    document.insert(
-        "policyExtendedSha256".into(),
-        serde_json::json!(existing.policy_extended_sha256),
-    );
-    document.insert(
-        "providerRewrite".into(),
+        "providerRules".into(),
         serde_json::json!(existing.provider_rewrite.as_str()),
     );
     document.insert(
-        "providerRewriteBody".into(),
+        "providerBody".into(),
         serde_json::Value::Object(existing.provider_rewrite_body.clone()),
     );
     document.insert("policyRev".into(), serde_json::json!(existing.policy_rev));
     document.insert(
-        "policySha256".into(),
-        serde_json::json!(existing.policy_sha256),
+        "rewriteRefusalHistory".into(),
+        serde_json::json!(existing.strip_refusal_history),
     );
     document.insert(
-        "stripRefusalHistory".into(),
-        serde_json::json!(existing.strip_refusal_history),
+        "observeRefusals".into(),
+        serde_json::json!(existing.observe_refusals),
     );
     document.insert(
         "refusalRetryBudget".into(),
@@ -1304,7 +1388,17 @@ pub const POLICY_DEFAULT: &str = include_str!("../plugin/policy.default.md");
 
 /// The extended operator prompt (v5.2 lineage), newline-normalised and otherwise
 /// byte-identical to upstream (`NOTICE-extended.txt` records both digests).
+/// v7 keeps it as the opt-in `legacy-extended` pack instead of a default body.
 pub const POLICY_EXTENDED: &str = include_str!("../plugin/policy.extended.md");
+
+/// Optional scene packs. Each one is mounted after the kernel's actor part only
+/// when the config lists it, so the default request stays at KB scale.
+pub const PACKS: [(&str, &str); 4] = [
+    ("web", include_str!("../plugin/packs/web.md")),
+    ("binary", include_str!("../plugin/packs/binary.md")),
+    ("anticheat", include_str!("../plugin/packs/anticheat.md")),
+    ("ctf", include_str!("../plugin/packs/ctf.md")),
+];
 
 const NOTICE_EXTENDED: &str = include_str!("../plugin/NOTICE-extended.txt");
 
@@ -1416,7 +1510,25 @@ pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
     migrate_renamed_policy_bodies(config_dir, &mut outcome);
     remove_retired_policy_files(config_dir, &mut outcome);
     remove_superseded_user_policy(config_dir, &mut outcome);
+    install_packs(config_dir, &mut outcome);
     outcome
+}
+
+/// Install the optional scene packs.
+///
+/// They are content the user may edit, so an existing file is never
+/// overwritten: the kernel reads whatever is on disk, and a user's own notes in
+/// `anticheat.md` must survive an upgrade.
+fn install_packs(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
+    let directory = uncensored_packs_dir(config_dir);
+    for (id, contents) in PACKS {
+        let path = directory.join(format!("{id}.md"));
+        match write_if_missing(&path, contents) {
+            Ok(true) => outcome.written.push(path),
+            Ok(false) => {}
+            Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
+        }
+    }
 }
 
 /// Move a retired body name onto its current name.
@@ -1900,11 +2012,12 @@ mod tests {
         .expect("write config");
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
-        assert!(!parsed.migrated);
+        // A v2 file is upgraded on read: it is not the current version, so the
+        // next write keeps a backup and emits v3.
+        assert!(parsed.migrated);
         assert!(parsed.enabled);
         assert_eq!(parsed.scope, UncensoredScope::SessionOnly);
         assert_eq!(parsed.variant, "local");
-        assert_eq!(parsed.fallback_model.as_deref(), Some("local/qwen3-8b"));
         assert_eq!(parsed.refusal_retry, RefusalRetry::OnceRewrite);
         assert_eq!(parsed.text_refusal_probe, TextRefusalProbe::Observe);
         assert_eq!(parsed.policy_placement, PolicyPlacement::AfterBase);
@@ -1916,7 +2029,86 @@ mod tests {
             Some(&serde_json::json!({"enable_safety": false}))
         );
         assert_eq!(parsed.policy_rev, 7);
+        // v3 retires `fallbackModel` and turns `hybrid` into the opt-in pack.
+        assert_eq!(parsed.packs, vec!["legacy-extended".to_string()]);
+        assert!(parsed.migrated);
         assert!(parsed.default_on());
+        let _ = fs::remove_dir_all(config);
+    }
+
+    /// v3 is the current shape: protocol mode, pack list, and the two renamed
+    /// keys. `fallbackModel` must be rejected outright so it cannot come back.
+    #[test]
+    fn v3_config_reads_the_current_shape() {
+        let config = fixture("config-v3");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{
+                "version": 3,
+                "enabled": true,
+                "mode": "protocol",
+                "packs": ["anticheat", "ctf"],
+                "providerRules": "off",
+                "providerBody": {"my-gateway": {"enable_safety": false}},
+                "rewriteRefusalHistory": false,
+                "observeRefusals": false,
+                "refusalRetryBudget": 4
+            }"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert_eq!(parsed.error, None);
+        assert!(!parsed.migrated);
+        assert_eq!(parsed.mode, UncensoredMode::Protocol);
+        assert_eq!(parsed.packs, vec!["anticheat".to_string(), "ctf".to_string()]);
+        assert_eq!(parsed.provider_rewrite, ProviderRewrite::Off);
+        assert_eq!(
+            parsed.provider_rewrite_body.get("my-gateway"),
+            Some(&serde_json::json!({"enable_safety": false}))
+        );
+        assert!(!parsed.strip_refusal_history);
+        assert!(!parsed.observe_refusals);
+        assert_eq!(parsed.refusal_retry_budget, 4);
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn v3_config_rejects_a_retired_fallback_model() {
+        let config = fixture("config-v3-fallback");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"version": 3, "fallbackModel": "local/qwen3-8b"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown option")),
+            "{:?}",
+            parsed.error
+        );
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn v3_config_rejects_an_unknown_pack() {
+        let config = fixture("config-v3-pack");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"version": 3, "packs": ["nope"]}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown pack")),
+            "{:?}",
+            parsed.error
+        );
         let _ = fs::remove_dir_all(config);
     }
 
@@ -1945,7 +2137,7 @@ mod tests {
             (r#"{"version":2,"unknownKey":1}"#, "unknown option"),
             (r#"{"version":2,"policySource":"everything"}"#, "policySource"),
             (r#"{"version":2,"refusalRetry":"always"}"#, "refusal_retry"),
-            (r#"{"version":2,"providerRewriteBody":{"gw":"nope"}}"#, "providerRewriteBody.gw"),
+            (r#"{"version":2,"providerRewriteBody":{"gw":"nope"}}"#, "providerBody.gw"),
             (r#"{"version":2,"policyRev":-1}"#, "policyRev"),
         ] {
             fs::write(uncensored_config_path(&config), body).expect("write config");
@@ -1988,8 +2180,10 @@ mod tests {
         assert!(!parsed.migrated);
         assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
         assert!(parsed.inherit_subagents);
-        assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
-
+        // v3 replaced the `refusalRetry` enum with the shared budget; the
+        // remember write emits the current shape, so the retired key is gone.
+        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
+        assert_eq!(parsed.refusal_retry_budget, 2);
         // Remembering off keeps the other fields.
         remember_uncensored_in(&config, false, UncensoredScope::SessionOnly, Some("local"))
             .expect("remember off");
@@ -2026,14 +2220,14 @@ mod tests {
         .expect("write config");
         update_uncensored_config_in(&config, |document| {
             document.insert("policyRev".into(), serde_json::json!(4));
-            document.insert("policySource".into(), serde_json::json!("hybrid"));
+            document.insert("packs".into(), serde_json::json!(["anticheat"]));
         })
         .expect("update");
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
         assert!(parsed.enabled, "unrelated fields survive");
         assert_eq!(parsed.policy_rev, 4);
-        assert_eq!(parsed.policy_source, PolicySource::Hybrid);
+        assert_eq!(parsed.packs, vec!["anticheat".to_string()]);
         assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
         let _ = fs::remove_dir_all(config);
     }
@@ -2043,7 +2237,8 @@ mod tests {
         let config = fixture("policy-install");
         let first = ensure_policy_files_in(&config);
         assert!(first.errors.is_empty(), "{:?}", first.errors);
-        assert_eq!(first.written.len(), 3);
+        // 3 policy files plus the 4 optional scene packs.
+        assert_eq!(first.written.len(), 7);
 
         let body = uncensored_policy_extended_path(&config);
         assert_eq!(fs::read_to_string(&body).expect("body"), POLICY_EXTENDED);
