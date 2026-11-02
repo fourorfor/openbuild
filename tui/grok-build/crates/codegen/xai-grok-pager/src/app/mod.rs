@@ -50,7 +50,6 @@ mod connect_timeout;
 mod csi_filter;
 mod dashboard_session_picker;
 mod dispatch;
-pub mod refusal_probe;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;

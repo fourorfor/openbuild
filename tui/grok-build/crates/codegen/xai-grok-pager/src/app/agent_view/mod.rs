@@ -1299,13 +1299,6 @@ pub struct AgentView {
     pub(crate) uncensored_mode_active: bool,
     /// Optimistic `/uncensored` switch, cleared by the next config-option update.
     pub(crate) uncensored_mode_pending: Option<bool>,
-    /// Prompt id of the single automatic retry sent after a provider refusal.
-    /// Cleared when that retry turn ends, so a second refusal cannot loop.
-    pub(crate) uncensored_retry_pending: bool,
-    /// A text-level refusal probe retry was already sent in this session.
-    /// The probe is a heuristic, so its retries are counted and capped by
-    /// `refusalRetryBudget` rather than fired on every turn.
-    pub(crate) uncensored_probe_retries: u32,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.
@@ -1710,25 +1703,16 @@ fn translate_local_submit(
             })
         }
         LocalQuestionKind::UncensoredMenu => {
-            // 0/1 turn it on (with or without remembering), 2/3 turn it off,
-            // 4 prints status. Turning on hands off to the policy-mode step.
-            let (on, remember) = match *idx {
-                0 => (true, false),
-                1 => (true, true),
-                2 => (false, false),
-                3 => (false, true),
-                4 => return InputOutcome::Action(Action::ShowUncensoredStatus),
+            // 0 toggles the mode, 1 toggles the remembered default, 2 prints the
+            // status, 3 opens the persona body in the user's editor.
+            let action = match *idx {
+                0 => Action::UncensoredToggleClicked,
+                1 => Action::UncensoredRememberToggled,
+                2 => Action::ShowUncensoredStatus,
+                3 => Action::EditUncensoredPersona,
                 _ => return InputOutcome::Changed,
             };
-            InputOutcome::Action(Action::UncensoredAnswered { on, remember })
-        }
-        LocalQuestionKind::UncensoredPolicyMenu => {
-            let legacy_extended = match *idx {
-                0 => false,
-                1 => true,
-                _ => return InputOutcome::Changed,
-            };
-            InputOutcome::Action(Action::UncensoredPolicyAnswered { legacy_extended })
+            InputOutcome::Action(action)
         }
     }
 }

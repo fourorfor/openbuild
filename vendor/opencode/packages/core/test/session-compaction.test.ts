@@ -21,7 +21,7 @@ import { SessionEvent } from "@opencode/core/session/event"
 import { SessionHistory } from "@opencode/core/session/history"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
-import { SessionProtocolPolicy } from "@opencode/core/session/protocol-policy"
+import { SessionAgentPersona } from "@opencode/core/session/agent-persona"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
@@ -105,7 +105,7 @@ const it = testEffect(
       SessionStore.node,
       SessionCompaction.node,
       SessionModelRequest.node,
-      SessionProtocolPolicy.node,
+      SessionAgentPersona.node,
       PluginHooks.node,
     ]),
     [

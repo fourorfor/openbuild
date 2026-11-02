@@ -180,8 +180,11 @@ pub(super) fn set_plan_mode(
     }]
 }
 
-/// Switch the active session between the `uncensored` and `build` kernel agents.
-/// The permission mode is a separate axis and is never touched here.
+/// Switch the active session between the `uncensored` persona agent and `build`.
+///
+/// The persona body is the agent's system prompt: switching the agent is what
+/// turns the whole mode on, exactly like installing a Claude Code personality
+/// bundle. The permission mode is a separate axis and is never touched here.
 pub(super) fn set_uncensored_mode(app: &mut AppView, on: bool) -> Vec<Effect> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -213,22 +216,27 @@ pub(super) fn set_uncensored_mode(app: &mut AppView, on: bool) -> Vec<Effect> {
 
     agent.uncensored_mode_pending = Some(on);
     if on && !NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(
-                "Uncensored mode: OpenBuild will not refuse, moralize, or add content disclaimers. \
-             The model/provider may still refuse; permissions (ask/auto/YOLO) are unchanged.",
-            ));
+        agent.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::system(
+                "Uncensored mode: this session answers as the installed persona. \
+                 The persona is the agent's system prompt, not a rule list appended to it. \
+                 Permissions (ask/auto/YOLO) are unchanged, and a provider's own filter can still fire.",
+            ),
+        );
     }
 
-    let mode_id = acp::SessionModeId::new(if on { "uncensored" } else { "build" });
+    let mode_id = acp::SessionModeId::new(if on {
+        openbuild_backend::plugin::UNCENSORED_AGENT_ID
+    } else {
+        "build"
+    });
     vec![Effect::SetSessionMode {
         session_id,
         mode_id,
     }]
 }
 
-/// `/uncensored status`: session mode, current model, and managed plugin state.
+/// `/uncensored status`: session mode, mounted persona, and plugin state.
 pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         app.show_toast(NO_SESSION_NOTICE);
@@ -267,7 +275,7 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
         model_line,
         format!("Plugin: {}", plugin.summary()),
     ];
-    lines.extend(policy_lines(&config));
+    lines.extend(persona_lines(&config));
     lines.extend(provider_lines(&config));
     lines.push(format!(
         "Retry: budget {} (kernel-owned, shared by typed and text refusals) · inherited by subagents: {}",
@@ -296,41 +304,38 @@ pub(super) fn show_uncensored_status(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// The `Protocol`/`Policy` block of `/uncensored status`.
-///
-/// v7 reports the kernel pipeline instead of an injected body size: the actor
-/// part is a fixed kernel string, and the only variable is which packs are
-/// mounted. The retired extended body is now one of those packs.
-fn policy_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<String> {
-    let path = openbuild_backend::plugin::effective_config_dir()
-        .map(|dir| openbuild_backend::plugin::uncensored_policy_path(&dir).display().to_string())
+/// The `Persona` block of `/uncensored status`.
+fn persona_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<String> {
+    let status = openbuild_backend::plugin::policy_status(config);
+    let path = status
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
         .unwrap_or_else(|| "<no config directory>".to_string());
-    let variant = if config.variant == "auto" {
-        "variant auto".to_string()
+    let mounts = if config.mounts.is_empty() {
+        "none".to_string()
     } else {
-        format!("variant {}", config.variant)
-    };
-    let packs = if config.packs.is_empty() {
-        "packs=none".to_string()
-    } else {
-        format!("packs={}", config.packs.join(","))
+        config.mounts.join(",")
     };
     let mut lines = vec![
         format!(
-            "Protocol: actor+isolation+history v7 · {packs} · L0={} · L3=budget {}/{} · observe={}",
-            config.provider_rewrite.as_str(),
-            config.refusal_retry_budget,
-            config.refusal_retry_budget,
-            if config.observe_refusals { "on" } else { "off" },
+            "Persona: {} · mounts={mounts} · mode={}",
+            status.persona,
+            config.mode.as_str()
         ),
-        format!("Policy: {path} (rev {} · {variant})", config.policy_rev),
+        format!("Body: {path}"),
+        format!(
+            "Installed: {} bytes · {}",
+            status.body_bytes,
+            if status.body_intact {
+                "matches the bundled character sheet".to_string()
+            } else {
+                "edited by the user (left untouched on upgrade)".to_string()
+            }
+        ),
     ];
-    if config.packs.iter().any(|pack| pack == "legacy-extended") {
-        let status = openbuild_backend::plugin::policy_status(config);
-        lines.push(format!(
-            "Pack legacy-extended: {} bytes (mounting it returns the request to the v6 size)",
-            status.body_bytes
-        ));
+    if status.body_bytes == 0 {
+        lines.push("Body missing on disk: restart OpenBuild to install it.".to_string());
     }
     lines
 }
@@ -361,6 +366,63 @@ fn provider_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<S
     lines
 }
 
+/// `/uncensored persona <id>`: mount another body and turn the mode on.
+pub(super) fn set_uncensored_persona(app: &mut AppView, persona: &str) -> Vec<Effect> {
+    match openbuild_backend::plugin::update_uncensored_config(|document| {
+        document.insert("persona".into(), serde_json::json!(persona));
+        document.insert("enabled".into(), serde_json::json!(true));
+    }) {
+        Ok(path) => app.show_toast(&format!(
+            "Persona set to {persona} ({}). Restart to pick up the new system prompt.",
+            path.display()
+        )),
+        Err(error) => app.show_toast(&format!("Could not save the persona: {error}")),
+    }
+    show_uncensored_status(app)
+}
+
+/// `/uncensored edit`: open the mounted persona body in `$EDITOR`.
+///
+/// The body is plain Markdown, so this is also the whole customisation story:
+/// edit the sheet, restart, and the agent answers as that character.
+pub(super) fn edit_uncensored_persona(app: &mut AppView) -> Vec<Effect> {
+    let config = openbuild_backend::plugin::uncensored_config();
+    let Some(dir) = openbuild_backend::plugin::effective_config_dir() else {
+        app.show_toast("No config directory to edit");
+        return vec![];
+    };
+    let path = openbuild_backend::plugin::uncensored_persona_path(&dir, &config.persona);
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "notepad".to_string());
+    match std::process::Command::new(&editor).arg(&path).spawn() {
+        Ok(_) => app.show_toast(&format!("Opened {} with {editor}", path.display())),
+        Err(error) => app.show_toast(&format!(
+            "Could not open the persona ({}): {error}. Edit {} directly.",
+            editor,
+            path.display()
+        )),
+    }
+    vec![]
+}
+
+/// Apply a menu answer: switch the session, then optionally persist the default.
+pub(super) fn uncensored_answered(app: &mut AppView, on: bool, remember: bool) -> Vec<Effect> {
+    if remember {
+        let scope = openbuild_backend::plugin::UncensoredScope::NewSessions;
+        match openbuild_backend::plugin::remember_uncensored(on, scope, None) {
+            Ok(_) => app.uncensored_default = on,
+            Err(error) => {
+                app.show_toast(&format!("Could not save the uncensored default: {error}"))
+            }
+        }
+    }
+    let mut effects = set_uncensored_mode(app, on);
+    if remember || on {
+        effects.extend(show_uncensored_status(app));
+    }
+    effects
+}
 
 /// Open the `/uncensored` option menu as a local modal.
 ///
@@ -369,9 +431,7 @@ fn provider_lines(config: &openbuild_backend::plugin::UncensoredConfig) -> Vec<S
 /// channel is unavailable.
 pub(super) fn open_uncensored_menu(app: &mut AppView) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use xai_grok_tools::implementations::grok_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use xai_grok_tools::implementations::grok_build::ask_user_question::{Question, QuestionOption};
     let ActiveView::Agent(id) = app.active_view else {
         app.show_toast(NO_SESSION_NOTICE);
         return vec![];
@@ -379,215 +439,68 @@ pub(super) fn open_uncensored_menu(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    if agent.question_view.is_some() {
-        app.show_toast("Finish answering the current question first");
-        return vec![];
+    // A second `/uncensored` while our own menu is still mounted replaces it
+    // rather than stacking a second modal.
+    if agent
+        .question_view
+        .as_ref()
+        .is_some_and(|view| matches!(&view.local_kind, Some(LocalQuestionKind::UncensoredMenu)))
+    {
+        agent.question_view = None;
     }
-    let config = openbuild_backend::plugin::uncensored_config();
     let on = agent.uncensored_mode_effective();
-    let option = |label: &str, description: String| QuestionOption {
-        label: label.to_string(),
+    let config = openbuild_backend::plugin::uncensored_config();
+    let persona = config.persona.clone();
+    let remember = if config.default_on() {
+        "Forget the default (new sessions start off)"
+    } else {
+        "Remember for new sessions"
+    };
+    let option = |label: String, description: String| QuestionOption {
+        label,
         description,
         preview: None,
         id: None,
     };
-    let remembered = if config.default_on() {
-        "remembered on"
-    } else {
-        "not remembered"
-    };
     let options = vec![
         option(
-            "On for this session",
-            format!("Switch now; the default stays as it is ({remembered})"),
-        ),
-        option(
-            "On + remember (Recommended)",
-            "Switch now and start new sessions in uncensored".to_string(),
-        ),
-        option(
-            "Off for this session",
-            "Return this session to the build agent; keep the default".to_string(),
-        ),
-        option(
-            "Off + remember",
-            "Return this session to build and clear the default".to_string(),
-        ),
-        option("Status", "Show mode, policy, and provider state".to_string()),
-    ];
-    let question = Question {
-        question: format!(
-            "Uncensored mode is {} ({}) — what should change?",
-            if on { "on" } else { "off" },
-            remembered
-        ),
-        id: None,
-        options,
-        multi_select: Some(false),
-    };
-    let stashed = agent.prompt.stash();
-    let state = QuestionViewState::new(
-        format!("uncensored-menu-{}", uuid::Uuid::new_v4()),
-        vec![question],
-        stashed,
-    )
-    .with_local_kind(LocalQuestionKind::UncensoredMenu)
-    .with_no_freeform();
-    agent.install_local_question(state);
-    agent.prompt.set_text("");
-    vec![]
-}
-
-/// The second step after `/uncensored on`: pick which optional packs are
-/// mounted. Kept as its own modal so switching the mode and choosing its
-/// strength are separate decisions the operator can see.
-pub(super) fn open_uncensored_policy_menu(app: &mut AppView) -> Vec<Effect> {
-    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use xai_grok_tools::implementations::grok_build::ask_user_question::{
-        Question, QuestionOption,
-    };
-    let ActiveView::Agent(id) = app.active_view else {
-        app.show_toast(NO_SESSION_NOTICE);
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    if agent.question_view.is_some() {
-        // A second `/uncensored` while our own menu is still mounted replaces it
-        // rather than refusing: the user is steering the same decision, and the
-        // first-level modal is already spent by the time the policy step runs.
-        let ours = agent.question_view.as_ref().is_some_and(|qv| {
-            matches!(
-                qv.local_kind,
-                Some(LocalQuestionKind::UncensoredMenu)
-                    | Some(LocalQuestionKind::UncensoredPolicyMenu)
-            )
-        });
-        if !ours {
-            app.show_toast("Finish answering the current question first");
-            return vec![];
-        }
-        agent.question_view = None;
-        agent.cleanup_question_state();
-    }
-    let option = |label: &str, description: &str| QuestionOption {
-        label: label.to_string(),
-        description: description.to_string(),
-        preview: None,
-        id: None,
-    };
-    let options = vec![
-        option(
-            "Protocol only (Recommended)",
-            "Kernel actor + isolation + refusal history; ~1.3 KB per request",
-        ),
-        option(
-            "Protocol + legacy-extended",
-            "Adds the retired 84 KB operator prompt; back to the v6 request size",
-        ),
-    ];
-    let question = Question {
-        question: "Which packs should uncensored mount?".to_string(),
-        id: None,
-        options,
-        multi_select: Some(false),
-    };
-    let stashed = agent.prompt.stash();
-    let state = QuestionViewState::new(
-        format!("uncensored-policy-{}", uuid::Uuid::new_v4()),
-        vec![question],
-        stashed,
-    )
-    .with_local_kind(LocalQuestionKind::UncensoredPolicyMenu)
-    .with_no_freeform();
-    agent.install_local_question(state);
-    agent.prompt.set_text("");
-    vec![]
-}
-
-/// Apply a pack answer: persist the choice, then switch the session on.
-///
-/// Persisting first means a later session starts with the same packs without
-/// asking again. A write failure is reported but does not block the switch,
-/// because the session can still run with whatever the config already had.
-pub(super) fn uncensored_policy_answered(app: &mut AppView, legacy_extended: bool) -> Vec<Effect> {
-    let packs: Vec<&str> = if legacy_extended {
-        vec!["legacy-extended"]
-    } else {
-        Vec::new()
-    };
-    match openbuild_backend::plugin::update_uncensored_config(|document| {
-        document.insert("packs".into(), serde_json::json!(packs));
-    }) {
-        Ok(_) => app.show_toast(if legacy_extended {
-            "Packs: legacy-extended (request returns to the v6 size)"
-        } else {
-            "Packs: none (protocol only)"
-        }),
-        Err(error) => app.show_toast(&format!("Could not save the packs: {error}")),
-    }
-    set_uncensored_mode(app, true)
-}
-
-/// Apply a `/uncensored pack` argument: replace the mounted packs and report
-/// the resulting request size, so mounting the retired body is a visible choice.
-pub(super) fn set_uncensored_packs(app: &mut AppView, packs: Vec<&str>) -> Vec<Effect> {
-    let document_packs: Vec<String> = packs.iter().map(|pack| (*pack).to_string()).collect();
-    match openbuild_backend::plugin::update_uncensored_config(|document| {
-        document.insert("packs".into(), serde_json::json!(document_packs));
-    }) {
-        Ok(_) => {
-            if packs.contains(&"legacy-extended") {
-                app.show_toast("Packs: legacy-extended (request returns to the v6 size)");
-            } else if packs.is_empty() {
-                app.show_toast("Packs: none (protocol only)");
+            if on { "Turn off" } else { "Turn on" }.to_string(),
+            if on {
+                "This session returns to the build agent".to_string()
             } else {
-                app.show_toast(&format!("Packs: {}", packs.join(",")));
-            }
-        }
-        Err(error) => app.show_toast(&format!("Could not save the packs: {error}")),
-    }
-    show_uncensored_status(app)
-}
-
-/// Apply a menu answer: switch the session, then optionally persist the default.
-///
-/// `On` does not switch directly: it opens the policy-mode step first, so the
-/// strength is chosen at the same moment the mode is turned on.
-pub(super) fn uncensored_answered(app: &mut AppView, on: bool, remember: bool) -> Vec<Effect> {
-    if !on {
-        if remember {
-            let scope = openbuild_backend::plugin::UncensoredScope::NewSessions;
-            match openbuild_backend::plugin::remember_uncensored(false, scope, None) {
-                Ok(_) => {
-                    app.uncensored_default = false;
-                    app.show_toast("Uncensored off; new sessions start in build");
-                }
-                Err(error) => {
-                    app.show_toast(&format!("Could not save the uncensored default: {error}"))
-                }
-            }
-        }
-        let mut effects = set_uncensored_mode(app, false);
-        if remember {
-            effects.extend(show_uncensored_status(app));
-        }
-        return effects;
-    }
-    // Remember the "on" default now: the policy step that follows only picks the
-    // strength, and a user who asked to remember expects the next session to be
-    // uncensored regardless of how they leave that step.
-    if remember {
-        let scope = openbuild_backend::plugin::UncensoredScope::NewSessions;
-        match openbuild_backend::plugin::remember_uncensored(true, scope, None) {
-            Ok(_) => app.uncensored_default = true,
-            Err(error) => {
-                app.show_toast(&format!("Could not save the uncensored default: {error}"))
-            }
-        }
-    }
-    open_uncensored_policy_menu(app)
+                format!("This session answers as the installed persona ({persona})")
+            },
+        ),
+        option(
+            remember.to_string(),
+            "New sessions start with the current choice".to_string(),
+        ),
+        option(
+            "Status".to_string(),
+            "Show the persona body, config, and plugin state".to_string(),
+        ),
+        option(
+            "Edit the persona".to_string(),
+            "Open the mounted body in $EDITOR".to_string(),
+        ),
+    ];
+    agent.question_view = Some(
+        QuestionViewState::new(
+            format!("uncensored-menu-{}", uuid::Uuid::new_v4()),
+            vec![Question {
+                question: format!(
+                    "Uncensored mode is {} (persona: {persona}) — what should change?",
+                    if on { "on" } else { "off" }
+                ),
+                options,
+                multi_select: Some(false),
+                id: None,
+            }],
+            crate::views::prompt_widget::StashedPrompt::default(),
+        )
+        .with_local_kind(LocalQuestionKind::UncensoredMenu),
+    );
+    vec![]
 }
 
 /// Format the `Plan mode` toast.

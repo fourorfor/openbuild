@@ -2796,11 +2796,13 @@ fn uncensored_status_reports_mode_and_plugin() {
     assert!(text.contains("Uncensored mode: on"), "{text}");
     assert!(text.contains("Plugin:"), "{text}");
     assert!(text.contains("Config:"), "{text}");
-    assert!(text.contains("Protocol: actor+isolation+history v7"), "{text}");
+    // The status reports the persona the kernel will mount, not a rule pipeline.
+    assert!(text.contains("Persona:"), "{text}");
+    assert!(text.contains("mode=persona"), "{text}");
+    assert!(text.contains("Body:"), "{text}");
     // The status names the provider-side limits instead of implying more.
     assert!(text.contains("server-side semantic moderation unaffected"), "{text}");
     assert!(text.contains("may still refuse"), "{text}");
-    assert!(text.contains("Policy:"), "{text}");
     assert!(text.contains("Retry: budget"), "{text}");
     assert!(text.contains("Refusal history rewrite: on"), "{text}");
 }
@@ -2819,8 +2821,8 @@ fn bare_uncensored_opens_a_local_menu_modal() {
         Some(crate::views::question_view::LocalQuestionKind::UncensoredMenu)
     ));
     let options = &question.questions[0].options;
-    assert_eq!(options.len(), 5, "on / on+remember / off / off+remember / status");
-    assert!(options[1].label.contains("remember"));
+    assert_eq!(options.len(), 4, "toggle / remember / status / edit");
+    assert!(options[1].label.contains("default"));
 }
 
 #[test]
@@ -2858,7 +2860,7 @@ fn menu_cancel_turns_the_mode_off_without_remembering() {
     dispatch(Action::OpenUncensoredMenu, &mut app);
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let question = agent.question_view.as_mut().expect("menu open");
-    question.selections[0] = QuestionSelection::Single(Some(2));
+    question.selections[0] = QuestionSelection::Single(Some(1));
     let question = agent.question_view.as_ref().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(
         question,
@@ -2866,36 +2868,28 @@ fn menu_cancel_turns_the_mode_off_without_remembering() {
         false,
     );
     match outcome {
-        crate::app::app_view::InputOutcome::Action(Action::UncensoredAnswered { on, remember }) => {
-            assert!(!on);
-            assert!(!remember);
-        }
-        other => panic!("expected UncensoredAnswered, got {other:?}"),
+        crate::app::app_view::InputOutcome::Action(Action::UncensoredRememberToggled) => {}
+        other => panic!("expected UncensoredRememberToggled, got {other:?}"),
     }
 }
 
+/// Row 0 flips the session mode without touching the remembered default.
 #[test]
-fn policy_menu_rows_map_to_protocol_and_legacy_pack() {
+fn menu_toggle_row_maps_to_the_toggle_action() {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
-    for (index, expected) in [(0usize, false), (1, true)] {
-        let mut app = test_app_with_agent();
-        dispatch(Action::OpenUncensoredMenu, &mut app);
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let question = agent.question_view.as_mut().expect("menu open");
-        question.selections[0] = QuestionSelection::Single(Some(index));
-        let question = agent.question_view.as_ref().unwrap();
-        match crate::app::agent_view::translate_local_submit_for_test(
-            question,
-            LocalQuestionKind::UncensoredPolicyMenu,
-            false,
-        ) {
-            crate::app::app_view::InputOutcome::Action(Action::UncensoredPolicyAnswered {
-                legacy_extended,
-            }) => {
-                assert_eq!(legacy_extended, expected);
-            }
-            other => panic!("expected UncensoredPolicyAnswered, got {other:?}"),
-        }
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenUncensoredMenu, &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let question = agent.question_view.as_mut().expect("menu open");
+    question.selections[0] = QuestionSelection::Single(Some(0));
+    let question = agent.question_view.as_ref().unwrap();
+    match crate::app::agent_view::translate_local_submit_for_test(
+        question,
+        LocalQuestionKind::UncensoredMenu,
+        false,
+    ) {
+        crate::app::app_view::InputOutcome::Action(Action::UncensoredToggleClicked) => {}
+        other => panic!("expected UncensoredToggleClicked, got {other:?}"),
     }
 }
 
@@ -2906,7 +2900,7 @@ fn menu_status_row_routes_to_its_action() {
     dispatch(Action::OpenUncensoredMenu, &mut app);
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let question = agent.question_view.as_mut().expect("menu open");
-    question.selections[0] = QuestionSelection::Single(Some(4));
+    question.selections[0] = QuestionSelection::Single(Some(2));
     let question = agent.question_view.as_ref().unwrap();
     match crate::app::agent_view::translate_local_submit_for_test(
         question,
@@ -3014,12 +3008,11 @@ fn the_menu_refuses_to_stack_on_an_open_question() {
     assert_eq!(first, second, "the original modal stays mounted");
 }
 
-/// The whole path the user actually takes: open `/uncensored`, answer "On"
-/// through the real submit pipeline, dispatch the resulting action, and find the
-/// policy menu mounted. Guards against the action mapping being right while the
-/// dispatch step silently refuses the second modal.
+/// The whole path the user actually takes: open `/uncensored`, pick "Turn on"
+/// through the real submit pipeline, dispatch the resulting action, and see the
+/// session switch to the persona agent in one step.
 #[test]
-fn answering_on_from_the_menu_opens_the_policy_step() {
+fn answering_on_from_the_menu_switches_the_agent() {
     use crate::views::question_view::QuestionSelection;
     let mut app = test_app_with_agent();
     dispatch(Action::OpenUncensoredMenu, &mut app);
@@ -3035,36 +3028,19 @@ fn answering_on_from_the_menu_opens_the_policy_step() {
     };
     dispatch(action, &mut app);
 
-    let question = test_agent(&app, AgentId(0))
-        .question_view
-        .as_ref()
-        .expect("the policy step must be mounted");
-    assert!(
-        matches!(
-            question.local_kind,
-            Some(crate::views::question_view::LocalQuestionKind::UncensoredPolicyMenu)
-        ),
-        "expected the policy menu, got {:?}",
-        question.local_kind
-    );
-    assert_eq!(question.questions[0].options.len(), 2);
+    // One step now: the agent switch is the whole activation path.
+    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, Some(true));
 }
 
-/// `/uncensored on` is the fast path; it must reach the same policy step as the
-/// menu answer instead of switching straight to the agent.
+/// `/uncensored on` reaches the same agent switch with no intermediate modal.
 #[test]
-fn the_on_command_opens_the_policy_step() {
+fn the_on_command_switches_the_agent() {
     let mut app = test_app_with_agent();
-    dispatch(Action::OpenUncensoredPolicyMenu, &mut app);
+    dispatch(Action::SetUncensoredMode(true), &mut app);
 
-    let question = test_agent(&app, AgentId(0))
-        .question_view
-        .as_ref()
-        .expect("the policy step must be mounted");
-    assert!(matches!(
-        question.local_kind,
-        Some(crate::views::question_view::LocalQuestionKind::UncensoredPolicyMenu)
-    ));
-    // Nothing is switched until the strength is chosen.
-    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, None);
+    assert_eq!(test_agent(&app, AgentId(0)).uncensored_mode_pending, Some(true));
+    assert!(
+        test_agent(&app, AgentId(0)).question_view.is_none(),
+        "the fast path must not mount a second modal"
+    );
 }

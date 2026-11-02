@@ -1,6 +1,10 @@
-# The uncensored policy bodies are hashed byte-for-byte by tests and by
-# `/uncensored status`. A CRLF checkout would change both the byte count and
-# the sha256, so these files must stay LF on every platform.
-openbuild/tui/grok-build/crates/codegen/openbuild-backend/plugin/policy.*.md text eol=lf
-openbuild/tui/grok-build/crates/codegen/openbuild-backend/plugin/NOTICE-extended.txt text eol=lf
-openbuild/tests/uncensored-plugin.test.ts text eol=lf
+# The uncensored plugin contract test is checked out with LF on every platform
+# so that a CRLF checkout cannot change the assertions it makes about the
+# plugin source it reads.
+tests/uncensored-plugin.test.ts text eol=lf
+
+# The persona bodies under
+# tui/grok-build/crates/codegen/openbuild-backend/plugin/persona/ are compiled
+# into the backend with `include_str!` and installed byte-for-byte. They are
+# deliberately left to the normal checkout conversion (no `eol` rule) so that
+# the installed body always equals the body this build was compiled from.

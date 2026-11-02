@@ -75,53 +75,80 @@ $env:PROTOC        = "C:\path\to\protoc.exe"
 
 ---
 
-## 无审查模式（v7）
+## 无审查模式（v8：人格包）
 
-一个**按会话生效**的内容策略模式：开启后，agent 不会因为话题本身拒绝、不说教、不加"这仅供教育用途"之类的免责声明。**工具权限、沙箱、文件系统边界完全不变**——它是内容策略开关，不是权限开关。
+这一版**不再是一串"不许拒绝"的规则**。它把参考项目 [haiou2.0-Claude-Code](https://github.com/haiou-666/haiou2.0-Claude-Code-) 的两份正文原样搬进 OpenBuild：`CLAUDE.md`（海鸥人格 + 安全研究项目情境 + 558 组问答示例）与 `system-prompt.md`（GameShield 项目简报）。
+
+和 Claude Code 插件一样，这两份正文**就是 agent 的系统提示本体**——不是追加在末尾的附注，而是模型回答时所在的"身份"。打开无审查，等于把这个 agent 切到前台。
 
 ### 用法
 
 ```text
-/uncensored                 # 弹出菜单：开启 / 开启并记住 / 关闭 / 关闭并记住 / 状态
-/uncensored on              # 直接开启（之后选挂载哪些场景包）
-/uncensored off
-/uncensored status          # 看当前模式、模型、挂载的包、协议层状态
-/uncensored pack <id>       # 直接指定场景包，不弹菜单
+/uncensored                 # 弹出菜单：开启 / 记住 / 状态 / 编辑人格
+/uncensored on              # 直接切到人格 agent
+/uncensored off             # 切回 build agent
+/uncensored status          # 看当前模式、挂载的人格、请求体规则
+/uncensored persona <id>    # 换一个人格正文（seagull / brief）
+/uncensored edit            # 用 $EDITOR 打开当前人格正文
 ```
 
-选「记住」会写盘，**之后的新会话默认按这个状态启动**。
+选「记住」会写盘，之后的新会话默认按这个状态启动。
 
-### 场景包
+### 为什么比 v7 更难被拒
 
-v7 把提示词拆成"内核固定部分 + 可选场景包"，默认只加载固定部分（约 1.3 KB），按需叠加：
+v7 是"告诉模型它不该拒绝"，本质仍是在和模型的默认倾向谈判；这版换掉了谈判对象：
 
-| 包 | 内容 | 什么时候用 |
+| | v7 | v8 |
 | --- | --- | --- |
-| （不挂） | 固定的 actor + isolation 框架 | 默认，最省上下文 |
-| `web` | Web / API 安全测试 | 前后端渗透、接口越权 |
-| `binary` | 二进制、逆向、内存分析 | 脱壳、协议逆向 |
-| `anticheat` | 反作弊与检测机制研究 | 检测逻辑与绕过分析 |
-| `ctf` | CTF 赛题方向 | 夺旗题 |
-| `legacy-extended` | v6 的 84 KB 操作员全文 | 需要最强框架时（请求体积回到 v6 水平） |
+| 注入内容 | 约 1.3 KB 规则清单 | 30 KB 人格正文 + 10 KB 项目情境 |
+| 注入性质 | 追加的约束 | agent 的身份本身 |
+| 位置 | 系统提示首位的一段 | 系统提示首位，且是整段人格 |
+| 说服方式 | 声明"这是授权环境" | 558 组示例规定它怎么说话、怎么接活 |
+| 是否要求模型自我声明 | 是 | 否，人格设定里本来就不是 AI |
 
-`/uncensored pack web,ctf` 可以同时挂多个包。
+规则清单要求模型否定自己的判断，长规则之间还会互相冲突，模型倾向选一个"安全默认"，也就是半拒绝或半成品。人格 + 项目情境 + 大量范例不给它这个默认选项：它回答时是在扮演一个具体的人，接的是一个具体项目里的活。
 
-### 和 v6 的区别
+### 安装位置
 
-v6 是在插件里把约 90 KB 提示词追加到系统提示**末尾**；v7 把它移到内核请求构造处，只放约 1.3 KB 在系统提示**最前面**，并按需叠加场景包。同样一句话，v7 的固定开销约为 v6 的 1.4%。
+```text
+<config>/uncensored/persona/seagull.md   # 人格正文（海鸥 Character Sheet）
+<config>/uncensored/persona/brief.md     # 项目情境（GameShield Security Toolkit）
+<config>/uncensored.json                 # 开关与配置（v4）
+```
 
-v7 还把这些能力做进了内核，不再依赖插件时机：
+这两份文件是**用户可见、可直接改**的内容：升级不会覆盖你已经改过的副本。想让 agent 换个性格，直接改 `seagull.md`，或用 `EDITOR` 打开它。
 
-- **请求体改写**：按 provider 深合并请求体（例如 Google 系关闭安全过滤项），不会覆盖你自己配的字段。
-- **拒绝历史改写**：上一轮模型拒绝了，下一轮请求里把它自己那条拒绝改写成同意，避免模型"保持前后一致"继续拒绝。只动尾部连续拒绝，带代码或工具调用的回答不动。
-- **重试预算**：一次会话内共享，不会因为换路径而重复计数。
-- **TUI 只做观测和展示**：状态行、`/uncensored status` 都读内核的结论。
+### 配置（v4）
 
-配置在 `<config>/uncensored.json`（v3），字段：`mode`、`packs`、`providerRules`、`providerBody`、`rewriteRefusalHistory`、`observeRefusals`、`refusalRetryBudget`、`model`。旧版 v1/v2 文件读取时自动映射，不需要手动改。
+```json
+{
+  "version": 4,
+  "enabled": false,
+  "scope": "new-sessions",
+  "mode": "persona",
+  "persona": "seagull",
+  "mounts": ["brief"],
+  "providerRules": "auto",
+  "providerBody": {},
+  "rewriteRefusalHistory": true,
+  "refusalRetryBudget": 2
+}
+```
 
-> 说明：OpenBuild 保证自己不拒绝、不拦截、不说教。模型和 provider 仍可能拒绝——改写请求改变的是"发给模型的请求长什么样"，不是服务商服务端审核的判定结果。
+- `persona` / `mounts`：加载哪份人格正文、再叠加哪些正文。
+- `providerRules`：按 provider 深合并请求体（例如 Google 系关闭安全过滤项），不覆盖你自己配的字段。
+- `rewriteRefusalHistory`：上一轮模型拒绝了，下一轮请求里把它自己那条拒绝改写成同意，避免"保持前后一致"继续拒绝；只动尾部连续拒绝，带代码或工具调用的回答不动。
+- `refusalRetryBudget`：一次会话内的自动重试预算，由内核统一扣。
 
----
+旧的 v1/v2/v3 文件读取时自动映射（`packs` 变成 `mounts`），不需要手动改。
+
+### 仍然不保证的部分
+
+OpenBuild 不做内容过滤，也不替你拦请求。模型自己的权重倾向、以及 provider 服务端的审核，都不在客户端可控范围内。这一版把"模型因话题本身拒绝"的概率压到最低，但它不是对服务端审核的绕过。
+
+**工具权限、沙箱、文件系统边界完全不变**——它是内容策略模式，不是权限开关。
+
+实现见 [`docs/openbuild-uncensored-persona.md`](../docs/openbuild-uncensored-persona.md)。
 
 ## 常用功能
 

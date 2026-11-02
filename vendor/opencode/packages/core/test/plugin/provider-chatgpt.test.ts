@@ -27,7 +27,7 @@ import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
-import { SessionProtocolPolicy } from "@opencode/core/session/protocol-policy"
+import { SessionAgentPersona } from "@opencode/core/session/agent-persona"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
@@ -1183,7 +1183,7 @@ describe("ChatGPTPlugin", () => {
           })
         }).pipe(
           Effect.provide(SessionModelRequest.layer),
-          Effect.provide(SessionProtocolPolicy.testLayer),
+          Effect.provide(SessionAgentPersona.testLayer),
           Effect.provideService(SessionModelTransport.Service, transport),
         )
 
