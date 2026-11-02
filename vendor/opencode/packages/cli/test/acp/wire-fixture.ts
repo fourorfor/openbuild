@@ -487,7 +487,11 @@ export async function startWire(options: WireOptions = {}) {
   const clientStream = ndJsonStream(clientToAgent.writable, agentToClient.readable)
   const connection = client({ name: "test" })
     .onNotification("session/update", (ctx) => handled(updates, ctx.params))
-    .onNotification("opencode/session/child_update", Schema.decodeUnknownSync(ChildUpdate), (ctx) =>
+    // ACP reserves un-prefixed method names for its own schema. A custom
+    // notification only reaches `onNotification` when the wire name carries the
+    // `_` prefix; the Rust client in the TUI drops a bare name as
+    // method-not-found, which is what silently hid every `task` subagent.
+    .onNotification("_opencode/session/child_update", Schema.decodeUnknownSync(ChildUpdate), (ctx) =>
       handled(childUpdates, ctx.params),
     )
     .onRequest("session/request_permission", (ctx) => {

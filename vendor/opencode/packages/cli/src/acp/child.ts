@@ -1,6 +1,6 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk"
 
-export const UpdateMethod = "opencode/session/child_update"
+export const UpdateMethod = "_opencode/session/child_update"
 
 export type Session = {
   readonly id: string
