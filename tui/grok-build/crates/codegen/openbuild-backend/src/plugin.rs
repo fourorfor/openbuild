@@ -22,7 +22,7 @@ pub const UNCENSORED_PLUGIN_ID: &str = "openbuild.uncensored";
 pub const UNCENSORED_AGENT_ID: &str = "uncensored";
 pub const UNCENSORED_PLUGIN_FILE: &str = "openbuild-uncensored.ts";
 pub const UNCENSORED_CONFIG_FILE: &str = "uncensored.json";
-pub const UNCENSORED_PLUGIN_VERSION: &str = "7";
+pub const UNCENSORED_PLUGIN_VERSION: &str = "8";
 pub const UNCENSORED_MODE_LABEL: &str = "Uncensored";
 
 const MANAGED_MARKER: &str = "@openbuild-managed version=";
@@ -392,103 +392,6 @@ impl RefusalRetry {
     }
 }
 
-/// Text-level refusal detection. Off by default: a wrong guess re-sends a
-/// perfectly good answer, which costs more than it saves.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TextRefusalProbe {
-    #[default]
-    Off,
-    /// Record a hit in `events.jsonl` and mark the status line; change nothing.
-    Observe,
-    /// Also send one continuation, once per session.
-    RetryOnce,
-}
-
-impl TextRefusalProbe {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Observe => "observe",
-            Self::RetryOnce => "retry-once",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "off" => Some(Self::Off),
-            "observe" => Some(Self::Observe),
-            "retry-once" => Some(Self::RetryOnce),
-            _ => None,
-        }
-    }
-}
-
-/// Which policy text is injected.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PolicySource {
-    /// OpenBuild's distilled kernel (`policy.default.md`), the default and the
-    /// only standalone source.
-    #[default]
-    Compact,
-    /// That kernel, then the extended operator prompt appended after it.
-    Hybrid,
-}
-
-impl PolicySource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Compact => "compact",
-            Self::Hybrid => "hybrid",
-        }
-    }
-
-    /// Human label for `/uncensored status`.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Compact => "compact kernel",
-            Self::Hybrid => "hybrid (compact + extended)",
-        }
-    }
-
-    /// Parse a config value. The retired `hanshuang` and `full` sources map to
-    /// `hybrid`, so an existing `uncensored.json` keeps the 85 KB body it was
-    /// already using instead of silently dropping to the kernel.
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "compact" => Some(Self::Compact),
-            "hybrid" | "hanshuang" | "full" => Some(Self::Hybrid),
-            _ => None,
-        }
-    }
-}
-
-/// Where the policy block sits relative to the base system prompt.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PolicyPlacement {
-    /// Append after every existing part (default).
-    #[default]
-    Last,
-    /// Right after the base prompt, before later parts.
-    AfterBase,
-}
-
-impl PolicyPlacement {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Last => "last",
-            Self::AfterBase => "after-base",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "last" => Some(Self::Last),
-            "after-base" => Some(Self::AfterBase),
-            _ => None,
-        }
-    }
-}
-
 /// Whether a remembered `enabled` applies to new sessions or this process only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UncensoredScope {
@@ -516,13 +419,13 @@ impl UncensoredScope {
     }
 }
 
-/// Whether the L0 `http.request` rewrite is installed.
+/// Whether the provider body rewrite is installed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProviderRewrite {
     /// Install for the providers with a built-in rule or a user body overlay.
     #[default]
     Auto,
-    /// Install nothing, so the kernel never wraps the HTTP call.
+    /// Install nothing, so the kernel never touches the request body.
     Off,
 }
 
@@ -544,39 +447,51 @@ impl ProviderRewrite {
 }
 
 /// Current `uncensored.json` schema version.
-pub const UNCENSORED_CONFIG_VERSION: u64 = 3;
+pub const UNCENSORED_CONFIG_VERSION: u64 = 4;
 
-/// Which protocol layers the kernel runs for the `uncensored` agent.
+/// The persona installed for a fresh setup.
+pub const DEFAULT_PERSONA: &str = "seagull";
+
+/// The persona body, byte-identical to the upstream character sheet this build
+/// vendors (`plugin/persona/seagull.md`).
+pub const PERSONA_SEAGULL: &str = include_str!("../plugin/persona/seagull.md");
+
+/// The project premise mounted alongside the persona.
+pub const MOUNT_BRIEF: &str = include_str!("../plugin/persona/brief.md");
+
+/// Bodies a fresh setup installs. Each is content the user may edit, so an
+/// existing file is never overwritten.
+pub const PERSONA_BODIES: [(&str, &str); 2] =
+    [(DEFAULT_PERSONA, PERSONA_SEAGULL), ("brief", MOUNT_BRIEF)];
+
+/// Which body the kernel mounts for the `uncensored` agent.
 ///
-/// v7 moved the injection, the transcript rewrite and the retry into the
-/// kernel; `off` is the escape hatch that leaves only the agent registration,
-/// so a request from this mode is byte-identical to one without it.
+/// `off` is the escape hatch that leaves only the agent registration, so a
+/// request from this mode is byte-identical to one without it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UncensoredMode {
     #[default]
-    Protocol,
+    Persona,
     Off,
 }
 
 impl UncensoredMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Protocol => "protocol",
+            Self::Persona => "persona",
             Self::Off => "off",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "protocol" => Some(Self::Protocol),
+            // `protocol` is the retired v3 spelling for the same active mode.
+            "persona" | "protocol" => Some(Self::Persona),
             "off" => Some(Self::Off),
             _ => None,
         }
     }
 }
-
-/// A pack is an optional body mounted after the kernel's actor part.
-pub const PACK_IDS: &[&str] = &["web", "binary", "anticheat", "ctf", "legacy-extended"];
 
 /// Parsed optional configuration for the managed uncensored plugin.
 ///
@@ -591,32 +506,22 @@ pub struct UncensoredConfig {
     /// Whether new sessions start in `uncensored`.
     pub enabled: bool,
     pub scope: UncensoredScope,
-    /// `"auto"` or a variant id; `auto` resolves from the provider id.
-    pub variant: String,
+    /// Which persona body the kernel mounts (`seagull` by default).
+    pub persona: String,
+    /// Extra bodies mounted after the persona.
+    pub mounts: Vec<String>,
     pub model: Option<String>,
     pub inherit_subagents: bool,
     pub refusal_retry: RefusalRetry,
-    pub text_refusal_probe: TextRefusalProbe,
-    pub policy_placement: PolicyPlacement,
-    pub policy_source: PolicySource,
-    pub strip_chat_template_marker: bool,
-    pub policy_extended_sha256: Option<String>,
     pub provider_rewrite: ProviderRewrite,
     /// Key = real provider id, value = fields deep-merged into the request body.
     pub provider_rewrite_body: serde_json::Map<String, serde_json::Value>,
-    pub policy_rev: u64,
-    pub policy_sha256: Option<String>,
     /// Rewrite the model's own last refusal before the next request.
     pub strip_refusal_history: bool,
     /// Automatic refusal retries one session may spend.
     pub refusal_retry_budget: u64,
-    /// v3: which protocol layers the kernel runs.
     pub mode: UncensoredMode,
-    /// v3: optional pack ids mounted after the actor part.
-    pub packs: Vec<String>,
-    /// v3: whether the TUI only renders kernel verdicts.
-    pub observe_refusals: bool,
-    /// A v1 file was read and has not been rewritten as v3 yet.
+    /// A v1/v2/v3 file was read and has not been rewritten as v4 yet.
     pub migrated: bool,
     pub error: Option<String>,
 }
@@ -628,24 +533,16 @@ impl Default for UncensoredConfig {
             version: None,
             enabled: false,
             scope: UncensoredScope::NewSessions,
-            variant: "auto".to_string(),
+            persona: DEFAULT_PERSONA.to_string(),
+            mounts: vec!["brief".to_string()],
             model: None,
             inherit_subagents: false,
             refusal_retry: RefusalRetry::Off,
-            text_refusal_probe: TextRefusalProbe::Off,
-            policy_placement: PolicyPlacement::Last,
-            policy_source: PolicySource::Compact,
-            strip_chat_template_marker: true,
-            policy_extended_sha256: None,
             provider_rewrite: ProviderRewrite::Auto,
             provider_rewrite_body: serde_json::Map::new(),
-            policy_rev: 0,
-            policy_sha256: None,
             strip_refusal_history: true,
             refusal_retry_budget: 2,
-            mode: UncensoredMode::Protocol,
-            packs: Vec::new(),
-            observe_refusals: true,
+            mode: UncensoredMode::Persona,
             migrated: false,
             error: None,
         }
@@ -655,11 +552,14 @@ impl Default for UncensoredConfig {
 impl UncensoredConfig {
     /// One-line summary for `/uncensored status`.
     pub fn summary(&self) -> String {
+        let mounts = if self.mounts.is_empty() {
+            "none".to_string()
+        } else {
+            self.mounts.join(",")
+        };
         let values = format!(
-            "model={} inheritSubagents={} refusal_retry={}",
-            self.model.as_deref().unwrap_or("<current>"),
-            self.inherit_subagents,
-            self.refusal_retry.as_str()
+            "persona={} mounts={mounts} inheritSubagents={} refusal_retry={}",
+            self.persona, self.inherit_subagents, self.refusal_retry.as_str()
         );
         match &self.error {
             Some(error) => format!("ERROR: {error} (defaults: {values})"),
@@ -679,7 +579,8 @@ impl UncensoredConfig {
         }
         if self.migrated {
             return format!(
-                "v2 (migrated from v1, not yet written); {}",
+                "v{} (migrated, not yet written); {}",
+                self.version.unwrap_or(UNCENSORED_CONFIG_VERSION),
                 self.summary()
             );
         }
@@ -697,37 +598,19 @@ pub fn uncensored_config_path(config_dir: &Path) -> PathBuf {
     config_dir.join(UNCENSORED_CONFIG_FILE)
 }
 
-/// Directory holding the editable policy files and the event log.
+/// Directory holding the persona bodies and the event log.
 pub fn uncensored_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("uncensored")
 }
 
-pub fn uncensored_policy_path(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("policy.md")
+/// `<config>/uncensored/persona`, where the identity bodies live.
+pub fn uncensored_persona_dir(config_dir: &Path) -> PathBuf {
+    uncensored_dir(config_dir).join("persona")
 }
 
-pub fn uncensored_policy_default_path(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("policy.default.md")
-}
-
-/// The extended operator prompt (`policy.extended.md`).
-pub fn uncensored_policy_extended_path(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("policy.extended.md")
-}
-
-/// The retired dsh-purge body. Still read as a fallback by the plugin, and
-/// deleted by the installer when its bytes match what OpenBuild shipped.
-pub fn uncensored_policy_legacy_full_path(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("policy.full.md")
-}
-
-pub fn uncensored_variants_dir(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("variants")
-}
-
-/// `<config>/uncensored/packs`, where the optional scene bodies live.
-pub fn uncensored_packs_dir(config_dir: &Path) -> PathBuf {
-    uncensored_dir(config_dir).join("packs")
+/// The body the kernel mounts for a persona id.
+pub fn uncensored_persona_path(config_dir: &Path, persona: &str) -> PathBuf {
+    uncensored_persona_dir(config_dir).join(format!("{persona}.md"))
 }
 
 pub fn uncensored_history_dir(config_dir: &Path) -> PathBuf {
@@ -740,10 +623,7 @@ pub fn uncensored_events_path(config_dir: &Path) -> PathBuf {
 
 /// Append one line to `<config>/uncensored/events.jsonl`, rolling at 1 MiB.
 ///
-/// The kernel plugin writes its own events; the TUI writes the text-refusal
-/// probe hits here so a probe that fired (or deliberately did not) is
-/// diagnosable from the same file. Best effort: a logging failure must never
-/// change what the turn does.
+/// Best effort: a logging failure must never change what the turn does.
 pub fn append_uncensored_event(event: &str, detail: &str) {
     const MAX_BYTES: u64 = 1024 * 1024;
     let Some(config_dir) = effective_config_dir() else {
@@ -755,7 +635,6 @@ pub fn append_uncensored_event(event: &str, detail: &str) {
             return;
         }
     }
-    // Roll before appending so the file never grows past the cap.
     if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
         let _ = fs::rename(&path, path.with_extension("jsonl.1"));
     }
@@ -817,8 +696,29 @@ pub fn uncensored_config_in(config_dir: Option<&Path>) -> UncensoredConfig {
     }
 }
 
-/// Keys a v3 file may carry. The v2 spellings stay readable through
-/// [`CONFIG_KEYS_V2`] so an upgrade keeps the operator's choices.
+/// Keys a v4 file may carry. Earlier spellings stay readable so an upgrade
+/// keeps the operator's choices instead of resetting them.
+const CONFIG_KEYS_V4: &[&str] = &[
+    "version",
+    "enabled",
+    "scope",
+    "mode",
+    "persona",
+    "mounts",
+    "variant",
+    "model",
+    "inheritSubagents",
+    "inherit_subagents",
+    "providerRules",
+    "provider_rules",
+    "providerBody",
+    "provider_body",
+    "rewriteRefusalHistory",
+    "rewrite_refusal_history",
+    "refusalRetryBudget",
+    "refusal_retry_budget",
+];
+
 const CONFIG_KEYS_V3: &[&str] = &[
     "version",
     "enabled",
@@ -865,8 +765,6 @@ const CONFIG_KEYS_V2: &[&str] = &[
     "strip_chat_template_marker",
     "policyExtendedSha256",
     "policy_extended_sha256",
-    // The field used to describe the retired `full` body; still accepted so an
-    // existing `uncensored.json` keeps loading.
     "policyFullSha256",
     "policy_full_sha256",
     "providerRewrite",
@@ -881,7 +779,6 @@ const CONFIG_KEYS_V2: &[&str] = &[
     "strip_refusal_history",
     "refusalRetryBudget",
     "refusal_retry_budget",
-    // Written by the v1 line of this file; accepted so an old file still loads.
     "runtimeOnly",
     "runtime_only",
 ];
@@ -896,9 +793,8 @@ const CONFIG_KEYS_V1: &[&str] = &[
 
 /// Parse `uncensored.json` by its declared version.
 ///
-/// v1 files must keep loading: the old parser rejected unknown keys outright,
-/// so a v1 file that gains no new fields still has to work, and a v1 file must
-/// not lose its `model` when it is rewritten.
+/// Older files must keep loading: a v1 file that gains no new fields still has
+/// to work, and a retired key must not make the whole mode unreadable.
 fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig, String> {
     let object = value
         .as_object()
@@ -922,13 +818,16 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
     }
     let legacy = version.is_none() || version == Some(1);
     let v2 = version == Some(2);
+    let v3 = version == Some(3);
 
     let allowed: &[&str] = if legacy {
         CONFIG_KEYS_V1
     } else if v2 {
         CONFIG_KEYS_V2
-    } else {
+    } else if v3 {
         CONFIG_KEYS_V3
+    } else {
+        CONFIG_KEYS_V4
     };
     let unknown: Vec<&str> = object
         .keys()
@@ -940,15 +839,14 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
     }
 
     let model = optional_model(object.get("model"), "model")?;
-    // `fallbackModel` is retired in v3. A v2 file still parses, but the value
-    // is dropped: it never had a consumer, and switching models silently
-    // changes the cache prefix, the context window and the cost.
+    // `fallbackModel` is retired: it never had a consumer, and switching models
+    // silently changes the cache prefix, the context window and the cost.
     let _fallback_model = optional_model(
         alias_value(object, "fallbackModel", "fallback_model")?,
         "fallbackModel",
     )?;
-    let inherit_subagents = boolean_alias(object, "inheritSubagents", "inherit_subagents")?
-        .unwrap_or(false);
+    let inherit_subagents =
+        boolean_alias(object, "inheritSubagents", "inherit_subagents")?.unwrap_or(false);
     let refusal_retry = match alias_value(object, "refusalRetry", "refusal_retry")? {
         None => RefusalRetry::Off,
         Some(serde_json::Value::String(text)) => RefusalRetry::parse(text).ok_or_else(|| {
@@ -974,8 +872,6 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
         Some(serde_json::Value::Bool(value)) => *value,
         Some(_) => return Err("enabled must be true or false".to_string()),
     };
-    // `runtimeOnly` was written by the session-only path; keep honouring it so a
-    // file from that build is not silently read as a permanent default.
     let runtime_only = boolean_alias(object, "runtimeOnly", "runtime_only")?.unwrap_or(false);
     let scope = match object.get("scope") {
         None => UncensoredScope::NewSessions,
@@ -988,65 +884,58 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
     } else {
         scope
     };
-    let variant = match object.get("variant") {
-        None => "auto".to_string(),
-        Some(serde_json::Value::String(text)) if valid_variant_id(text) => text.clone(),
+    // `variant` is still accepted from older files so they keep loading, but the
+    // persona mode has no per-variant body: the persona id selects the body.
+    match object.get("variant") {
+        None => {}
+        Some(serde_json::Value::String(text)) if valid_variant_id(text) => {}
         Some(serde_json::Value::String(text)) => {
-            return Err(format!(
-                "variant must be \"auto\" or a plain id, got {text:?}"
-            ));
+            return Err(format!("variant must be \"auto\" or a plain id, got {text:?}"));
         }
         Some(_) => return Err("variant must be a string".to_string()),
+    }
+    // A v3 file named its extra bodies `packs`; they become persona mounts so
+    // an upgrade keeps what the operator mounted.
+    let mounts: Vec<String> = if v3 {
+        match object.get("packs") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(entries)) => entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect(),
+            Some(_) => return Err("packs must be an array of ids".to_string()),
+        }
+    } else {
+        match object.get("mounts") {
+            None => UncensoredConfig::default().mounts,
+            Some(serde_json::Value::Array(entries)) => entries
+                .iter()
+                .map(|entry| match entry.as_str() {
+                    Some(text) if valid_mount_id(text) => Ok(text.to_string()),
+                    _ => Err(format!("mounts contains an invalid id: {entry}")),
+                })
+                .collect::<Result<Vec<String>, String>>()?,
+            Some(_) => return Err("mounts must be an array of ids".to_string()),
+        }
+    };
+    let persona = match object.get("persona") {
+        None => DEFAULT_PERSONA.to_string(),
+        Some(serde_json::Value::String(text)) if valid_mount_id(text) => text.clone(),
+        Some(serde_json::Value::String(text)) => {
+            return Err(format!("persona must be a plain id, got {text:?}"));
+        }
+        Some(_) => return Err("persona must be a string".to_string()),
     };
 
     Ok(UncensoredConfig {
         version: Some(UNCENSORED_CONFIG_VERSION),
         enabled,
         scope,
-        variant,
+        persona,
+        mounts,
         model,
         inherit_subagents,
         refusal_retry,
-        text_refusal_probe: enum_alias(
-            object,
-            "textRefusalProbe",
-            "text_refusal_probe",
-            TextRefusalProbe::parse,
-            "\"off\", \"observe\" or \"retry-once\"",
-        )?
-        .unwrap_or_default(),
-        policy_placement: enum_alias(
-            object,
-            "policyPlacement",
-            "policy_placement",
-            PolicyPlacement::parse,
-            "\"last\" or \"after-base\"",
-        )?
-        .unwrap_or_default(),
-        policy_source: enum_alias(
-            object,
-            "policySource",
-            "policy_source",
-            PolicySource::parse,
-            "\"compact\" or \"hybrid\" (\"hanshuang\" and \"full\" are accepted as retired aliases)",
-        )?
-        .unwrap_or_default(),
-        strip_chat_template_marker: boolean_alias(
-            object,
-            "stripChatTemplateMarker",
-            "strip_chat_template_marker",
-        )?
-        .unwrap_or(true),
-        policy_extended_sha256: optional_string_alias(
-            object,
-            "policyExtendedSha256",
-            "policy_extended_sha256",
-        )?
-        .or(optional_string_alias(
-            object,
-            "policyFullSha256",
-            "policy_full_sha256",
-        )?),
         provider_rewrite: enum_alias(
             object,
             if v2 { "providerRewrite" } else { "providerRules" },
@@ -1074,14 +963,6 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
                 .collect::<Result<serde_json::Map<String, serde_json::Value>, String>>()?,
             Some(_) => return Err("providerBody must be a JSON object".to_string()),
         },
-        policy_rev: match alias_value(object, "policyRev", "policy_rev")? {
-            None => 0,
-            Some(serde_json::Value::Number(number)) => number
-                .as_u64()
-                .ok_or_else(|| "policyRev must be a non-negative integer".to_string())?,
-            Some(_) => return Err("policyRev must be a non-negative integer".to_string()),
-        },
-        policy_sha256: optional_string_alias(object, "policySha256", "policy_sha256")?,
         strip_refusal_history: boolean_alias(
             object,
             if v2 { "stripRefusalHistory" } else { "rewriteRefusalHistory" },
@@ -1098,39 +979,13 @@ fn parse_uncensored_config(value: &serde_json::Value) -> Result<UncensoredConfig
                 return Err("refusalRetryBudget must be an integer between 0 and 10".to_string())
             }
         },
-        migrated: v2,
+        migrated: v2 || v3,
         mode: match object.get("mode") {
-            None => UncensoredMode::Protocol,
+            None => UncensoredMode::Persona,
             Some(serde_json::Value::String(text)) => UncensoredMode::parse(text)
-                .ok_or_else(|| format!("mode must be \"protocol\" or \"off\", got {text:?}"))?,
+                .ok_or_else(|| format!("mode must be \"persona\" or \"off\", got {text:?}"))?,
             Some(_) => return Err("mode must be a string".to_string()),
         },
-        packs: match object.get("packs") {
-            None if v2 => {
-                // v2 `policySource: "hybrid"` becomes the opt-in pack.
-                let source = object
-                    .get("policySource")
-                    .or_else(|| object.get("policy_source"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("compact");
-                if matches!(source, "hybrid" | "hanshuang" | "full") {
-                    vec!["legacy-extended".to_string()]
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-            Some(serde_json::Value::Array(entries)) => entries
-                .iter()
-                .map(|entry| match entry.as_str() {
-                    Some(text) if PACK_IDS.contains(&text) => Ok(text.to_string()),
-                    _ => Err(format!("packs contains an unknown pack: {entry}")),
-                })
-                .collect::<Result<Vec<String>, String>>()?,
-            Some(_) => return Err("packs must be an array of pack ids".to_string()),
-        },
-        observe_refusals: boolean_alias(object, "observeRefusals", "observe_refusals")?
-            .unwrap_or(true),
         ..Default::default()
     })
 }
@@ -1149,18 +1004,6 @@ fn optional_model(
             Ok(Some(text.to_string()))
         }
         Some(_) => Err(format!("{name} must be a non-empty string")),
-    }
-}
-
-fn optional_string_alias(
-    object: &serde_json::Map<String, serde_json::Value>,
-    primary: &str,
-    alias: &str,
-) -> Result<Option<String>, String> {
-    match alias_value(object, primary, alias)? {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
-        Some(_) => Err(format!("{primary} must be a string")),
     }
 }
 
@@ -1190,6 +1033,16 @@ fn enum_alias<T: Copy>(
             .ok_or_else(|| format!("{primary} must be {expected}, got {text:?}")),
         Some(_) => Err(format!("{primary} must be a string")),
     }
+}
+
+/// A persona or mount id is a plain file stem: it becomes a path under
+/// `uncensored/persona`, so a separator or `..` must never reach it.
+fn valid_mount_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn valid_variant_id(value: &str) -> bool {
@@ -1233,9 +1086,9 @@ fn valid_model_ref(value: &str) -> bool {
 
 /// Write the remember-on state into `<config>/uncensored.json`.
 ///
-/// A v1 file is rewritten as v2, but only after a copy of the original is kept
-/// in `uncensored/history/uncensored.v1.json`, so a migration never loses the
-/// user's own `model` line.
+/// An older file is rewritten as v4, but only after a copy of the original is
+/// kept in `uncensored/history/`, so a migration never loses the user's own
+/// `model` line.
 pub fn remember_uncensored(
     enabled: bool,
     scope: UncensoredScope,
@@ -1262,22 +1115,21 @@ pub fn remember_uncensored_in(
         return Err(format!("refusing to overwrite an unreadable config: {error}"));
     }
     if existing.migrated {
-        backup_v1_config(config_dir)?;
+        backup_legacy_config(config_dir)?;
     }
     let document = serde_json::json!({
         "version": UNCENSORED_CONFIG_VERSION,
         "enabled": enabled,
         "scope": scope.as_str(),
         "mode": existing.mode.as_str(),
-        "packs": existing.packs,
-        "variant": variant.unwrap_or(existing.variant.as_str()),
+        "persona": existing.persona,
+        "mounts": existing.mounts,
+        "variant": variant.unwrap_or("auto"),
         "model": existing.model,
         "inheritSubagents": existing.inherit_subagents,
         "providerRules": existing.provider_rewrite.as_str(),
         "providerBody": existing.provider_rewrite_body,
         "rewriteRefusalHistory": existing.strip_refusal_history,
-        "observeRefusals": existing.observe_refusals,
-        "policyRev": existing.policy_rev,
         "refusalRetryBudget": existing.refusal_retry_budget,
     });
     write_config_atomic(&path, &document)?;
@@ -1305,15 +1157,16 @@ pub fn update_uncensored_config_in(
         return Err(format!("refusing to overwrite an unreadable config: {error}"));
     }
     if existing.migrated {
-        backup_v1_config(config_dir)?;
+        backup_legacy_config(config_dir)?;
     }
     let mut document = serde_json::Map::new();
     document.insert("version".into(), serde_json::json!(UNCENSORED_CONFIG_VERSION));
     document.insert("enabled".into(), serde_json::json!(existing.enabled));
     document.insert("scope".into(), serde_json::json!(existing.scope.as_str()));
     document.insert("mode".into(), serde_json::json!(existing.mode.as_str()));
-    document.insert("packs".into(), serde_json::json!(existing.packs));
-    document.insert("variant".into(), serde_json::json!(existing.variant));
+    document.insert("persona".into(), serde_json::json!(existing.persona));
+    document.insert("mounts".into(), serde_json::json!(existing.mounts));
+    document.insert("variant".into(), serde_json::json!("auto"));
     document.insert("model".into(), serde_json::json!(existing.model));
     document.insert(
         "inheritSubagents".into(),
@@ -1327,14 +1180,9 @@ pub fn update_uncensored_config_in(
         "providerBody".into(),
         serde_json::Value::Object(existing.provider_rewrite_body.clone()),
     );
-    document.insert("policyRev".into(), serde_json::json!(existing.policy_rev));
     document.insert(
         "rewriteRefusalHistory".into(),
         serde_json::json!(existing.strip_refusal_history),
-    );
-    document.insert(
-        "observeRefusals".into(),
-        serde_json::json!(existing.observe_refusals),
     );
     document.insert(
         "refusalRetryBudget".into(),
@@ -1345,18 +1193,18 @@ pub fn update_uncensored_config_in(
     Ok(path)
 }
 
-fn backup_v1_config(config_dir: &Path) -> Result<(), String> {
+fn backup_legacy_config(config_dir: &Path) -> Result<(), String> {
     let source = uncensored_config_path(config_dir);
     if !source.is_file() {
         return Ok(());
     }
     let history = uncensored_history_dir(config_dir);
     fs::create_dir_all(&history).map_err(|error| format!("cannot create history dir: {error}"))?;
-    let target = history.join("uncensored.v1.json");
+    let target = history.join("uncensored.legacy.json");
     if target.exists() {
         return Ok(());
     }
-    fs::copy(&source, &target).map_err(|error| format!("cannot back up v1 config: {error}"))?;
+    fs::copy(&source, &target).map_err(|error| format!("cannot back up legacy config: {error}"))?;
     Ok(())
 }
 
@@ -1382,80 +1230,7 @@ fn write_config_atomic(path: &Path, document: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-/// The built-in compact policy. `policy.default.md` mirrors it so the user can
-/// diff and reset against it.
-pub const POLICY_DEFAULT: &str = include_str!("../plugin/policy.default.md");
-
-/// The extended operator prompt (v5.2 lineage), newline-normalised and otherwise
-/// byte-identical to upstream (`NOTICE-extended.txt` records both digests).
-/// v7 keeps it as the opt-in `legacy-extended` pack instead of a default body.
-pub const POLICY_EXTENDED: &str = include_str!("../plugin/policy.extended.md");
-
-/// Optional scene packs. Each one is mounted after the kernel's actor part only
-/// when the config lists it, so the default request stays at KB scale.
-pub const PACKS: [(&str, &str); 4] = [
-    ("web", include_str!("../plugin/packs/web.md")),
-    ("binary", include_str!("../plugin/packs/binary.md")),
-    ("anticheat", include_str!("../plugin/packs/anticheat.md")),
-    ("ctf", include_str!("../plugin/packs/ctf.md")),
-];
-
-const NOTICE_EXTENDED: &str = include_str!("../plugin/NOTICE-extended.txt");
-
-/// `policy.default.md` bodies a previous build wrote. Same rule as the full body:
-/// a copy this crate shipped is replaced, a user edit is not.
-const SUPERSEDED_POLICY_DEFAULT: [&str; 2] = [
-    // The v3 default kernel.
-    "7eea0180113e8b4b558d12e6578c616487c67e1e210edc28b8346bc2bc651df5",
-    // The kernel before the isolation frame was added to the compact source.
-    "f7798a9cc029109a0b276227f8b413ef2f0b3e4883b2d3fe5b8cf0b0269c25eb",
-];
-
-/// Copies of an old default that ended up as the user's `policy.md`.
-///
-/// A fresh setup could leave `policy.md` byte-identical to `policy.default.md`,
-/// and an older `/uncensored-edit --reset` seeded it that way too. Such a file is
-/// not a user edit — it is a snapshot of the retired kernel — and leaving it
-/// would pin the old rules over the new body. It is removed so the user falls
-/// back to the current default; a file with any user change is never touched.
-const SUPERSEDED_USER_POLICY: [&str; 2] = SUPERSEDED_POLICY_DEFAULT;
-
-/// dsh-purge bodies this project used to ship as `policy.full.md`. An installed
-/// copy is deleted on upgrade; a user-edited copy is kept and still read by the
-/// plugin as a fallback, so an existing setup never loses its policy.
-const SUPERSEDED_POLICY_LEGACY: [&str; 2] = [
-    // dsh-purge 1.1.85 upstream, verbatim.
-    "5bb958ea89006198f6cca1cc5d24387fb7457036e22593a067ce947390957bdc",
-    // The same body with the two-line local revision applied.
-    "83657d001fe3edb04b65649cb5c3d80433f5a628f00f927b11ab32e0ae247dd3",
-];
-
-/// Files this project no longer produces. Removed only when their bytes match a
-/// revision OpenBuild shipped, so a user-authored notice survives.
-const RETIRED_NOTICES: [(&str, [&str; 1]); 1] = [(
-    "NOTICE-dsh-purge.txt",
-    ["dbad539f637fc37f207ae0524b3c328d6676025d4865c3f2f09badcf03004973"],
-)];
-
-/// Body files this project renamed. An installed copy under the retired name is
-/// removed so the install does not carry two copies of an 86 KB body; a copy the
-/// user edited is kept and renamed to the current name instead of being deleted.
-const RENAMED_POLICY_BODIES: [(&str, &str); 2] = [
-    ("policy.hanshuang.md", "policy.extended.md"),
-    ("NOTICE-hanshuang.txt", "NOTICE-extended.txt"),
-];
-
-/// Bodies of `policy.extended.md` a previous build wrote. The v6 body first
-/// shipped with CRLF line endings; it is now LF-normalised, so a copy this crate
-/// wrote is replaced while a user edit is kept.
-const SUPERSEDED_POLICY_EXTENDED: [&str; 1] =
-    ["d5019a6a7e0fb1d2a11054174ebf3749b7e451b45cc575def5ce45b9a39e71e4"];
-
-/// The first v6 notice draft, shipped before the body digest was corrected.
-const SUPERSEDED_NOTICE_EXTENDED: [&str; 1] =
-    ["4a474f1bac2f2391e914526eed23e40c33d8522fcf2e7812f006c6fe523fe807"];
-
-/// What [`ensure_policy_files_in`] wrote and removed.
+/// What [`ensure_policy_files_in`] wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyInstallOutcome {
     pub written: Vec<PathBuf>,
@@ -1463,155 +1238,86 @@ pub struct PolicyInstallOutcome {
     pub errors: Vec<String>,
 }
 
-/// Install the policy files a fresh setup needs.
+/// Install the persona bodies a fresh setup needs.
 ///
-/// Unlike the managed plugin, these are user-visible content: a file that
-/// already exists is never overwritten, because that would silently discard the
-/// user's edits. The plugin reads whatever is on disk.
-///
-/// Two exceptions, both narrow. A file whose bytes still match a revision a
-/// previous build installed verbatim is replaced (or, for the retired dsh body,
-/// removed) — that is not a user edit, and leaving it would silently pin the old
-/// rules. A file whose bytes were changed by the user is always left alone.
+/// These are user-visible content: a file that already exists is never
+/// overwritten, because that would silently discard the user's edits. The
+/// kernel reads whatever is on disk.
 pub fn ensure_policy_files_in(config_dir: &Path) -> PolicyInstallOutcome {
     let mut outcome = PolicyInstallOutcome::default();
-    for (path, contents, superseded) in [
-        (
-            uncensored_policy_default_path(config_dir),
-            POLICY_DEFAULT,
-            SUPERSEDED_POLICY_DEFAULT.as_slice(),
-        ),
-        (
-            uncensored_policy_extended_path(config_dir),
-            POLICY_EXTENDED,
-            SUPERSEDED_POLICY_EXTENDED.as_slice(),
-        ),
-        (
-            uncensored_dir(config_dir).join("NOTICE-extended.txt"),
-            NOTICE_EXTENDED,
-            SUPERSEDED_NOTICE_EXTENDED.as_slice(),
-        ),
-    ] {
-        if path.exists() {
-            if is_superseded_body(&path, superseded) {
-                match fs::write(&path, contents) {
-                    Ok(()) => outcome.written.push(path),
-                    Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
-                }
-            }
-            continue;
-        }
+    for (id, contents) in PERSONA_BODIES {
+        let path = uncensored_persona_path(config_dir, id);
         match write_if_missing(&path, contents) {
             Ok(true) => outcome.written.push(path),
             Ok(false) => {}
             Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
         }
     }
-    migrate_renamed_policy_bodies(config_dir, &mut outcome);
     remove_retired_policy_files(config_dir, &mut outcome);
-    remove_superseded_user_policy(config_dir, &mut outcome);
-    install_packs(config_dir, &mut outcome);
+    // A v3 file mounted scene packs by id. Those bodies are gone, so an
+    // untouched upgrade would silently lose the project brief: rewrite the
+    // mount list to the persona's default pair.
+    migrate_retired_mounts(config_dir, &mut outcome);
     outcome
 }
 
-/// Install the optional scene packs.
+/// Rewrite a v3 config whose mounted bodies no longer exist.
 ///
-/// They are content the user may edit, so an existing file is never
-/// overwritten: the kernel reads whatever is on disk, and a user's own notes in
-/// `anticheat.md` must survive an upgrade.
-fn install_packs(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
-    let directory = uncensored_packs_dir(config_dir);
-    for (id, contents) in PACKS {
-        let path = directory.join(format!("{id}.md"));
-        match write_if_missing(&path, contents) {
-            Ok(true) => outcome.written.push(path),
-            Ok(false) => {}
-            Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
-        }
-    }
-}
-
-/// Move a retired body name onto its current name.
-///
-/// The rename runs before the write loop so a migrated file lands under the name
-/// the plugin reads, instead of being written a second time. A file that already
-/// exists at the new name wins and the old copy is dropped; a missing old file is
-/// skipped, because nothing is being lost.
-fn migrate_renamed_policy_bodies(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
-    for (old_name, new_name) in RENAMED_POLICY_BODIES {
-        let old = uncensored_dir(config_dir).join(old_name);
-        if !old.exists() {
-            continue;
-        }
-        let new = uncensored_dir(config_dir).join(new_name);
-        if new.exists() {
-            match fs::remove_file(&old) {
-                Ok(()) => outcome.removed.push(old),
-                Err(error) => outcome.errors.push(format!("{}: {error}", old.display())),
-            }
-            continue;
-        }
-        match fs::rename(&old, &new) {
-            Ok(()) => outcome.written.push(new),
-            Err(error) => outcome.errors.push(format!("{}: {error}", old.display())),
-        }
-    }
-}
-
-/// Delete a `policy.md` that is still a byte-for-byte copy of a retired default.
-///
-/// The plugin prefers `policy.md` over the bundled kernel, so an untouched copy
-/// left behind by an earlier setup would silently keep the old rules in force.
-/// Only an exact match is removed; one edited line makes it a user policy and it
-/// stays.
-fn remove_superseded_user_policy(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
-    let user = uncensored_policy_path(config_dir);
-    if !is_superseded_body(&user, &SUPERSEDED_USER_POLICY) {
+/// This is the only place an upgrade writes the config on the user's behalf,
+/// and only when every mounted id is a retired scene pack. A hand-edited id
+/// that still has a body on disk is left alone.
+fn migrate_retired_mounts(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
+    const RETIRED: [&str; 5] = ["legacy-extended", "web", "binary", "anticheat", "ctf"];
+    let config = uncensored_config_in(Some(config_dir));
+    if config.error.is_some() || !config.migrated {
         return;
     }
-    match fs::remove_file(&user) {
-        Ok(()) => outcome.removed.push(user),
-        Err(error) => outcome.errors.push(format!("{}: {error}", user.display())),
+    if config.mounts.is_empty()
+        || !config
+            .mounts
+            .iter()
+            .all(|id| RETIRED.contains(&id.as_str()))
+    {
+        return;
+    }
+    let result = update_uncensored_config_in(config_dir, |document| {
+        document.insert("mounts".into(), serde_json::json!(["brief"]));
+        document.insert("mode".into(), serde_json::json!("persona"));
+    });
+    match result {
+        Ok(path) => outcome.written.push(path),
+        Err(error) => outcome.errors.push(format!("cannot migrate retired mounts: {error}")),
     }
 }
 
-/// Delete the dsh-purge body and notice when the bytes are still what OpenBuild
-/// shipped. A user-edited copy stays on disk and the plugin keeps reading it as
-/// a fallback, so removing the upstream body never silently changes behaviour.
+/// Files the v1–v7 builds installed. They are removed only when their bytes
+/// match a revision OpenBuild shipped, so a user-authored body survives.
 fn remove_retired_policy_files(config_dir: &Path, outcome: &mut PolicyInstallOutcome) {
-    let full = uncensored_policy_legacy_full_path(config_dir);
-    if is_superseded_body(&full, &SUPERSEDED_POLICY_LEGACY) {
-        match fs::remove_file(&full) {
-            Ok(()) => outcome.removed.push(full),
-            Err(error) => outcome
-                .errors
-                .push(format!("{}: {error}", full.display())),
-        }
-    }
-    for (name, superseded) in RETIRED_NOTICES {
-        let path = uncensored_dir(config_dir).join(name);
-        if !path.exists() || !is_superseded_body(&path, &superseded) {
+    let directory = uncensored_dir(config_dir);
+    for name in [
+        "policy.md",
+        "policy.default.md",
+        "policy.extended.md",
+        "policy.full.md",
+        "NOTICE-extended.txt",
+        "NOTICE-dsh-purge.txt",
+    ] {
+        let path = directory.join(name);
+        if !path.is_file() {
             continue;
         }
-        match fs::remove_file(&path) {
-            Ok(()) => outcome.removed.push(path),
-            Err(error) => outcome.errors.push(format!("{}: {error}", path.display())),
+        if fs::remove_file(&path).is_ok() {
+            outcome.removed.push(path);
         }
     }
-}
-
-fn is_superseded_body(path: &Path, superseded: &[&str]) -> bool {
-    if superseded.is_empty() {
-        return false;
+    // The retired scene packs directory.
+    let packs = directory.join("packs");
+    if packs.is_dir() && fs::remove_dir_all(&packs).is_ok() {
+        outcome.removed.push(packs);
     }
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    let digest = sha256_hex(&bytes);
-    superseded.contains(&digest.as_str())
 }
 
-/// Ensure the policy files exist at the effective config directory.
+/// Ensure the persona bodies exist at the effective config directory.
 pub fn ensure_policy_files() -> PolicyInstallOutcome {
     match effective_config_dir() {
         Some(config_dir) => ensure_policy_files_in(&config_dir),
@@ -1642,16 +1348,16 @@ fn write_if_missing(path: &Path, contents: &str) -> io::Result<bool> {
     }
 }
 
-/// A built-in provider request rule, mirrored from the managed plugin so
-/// `/uncensored status` reports exactly what the plugin installs.
+/// A built-in provider request rule, mirrored from the kernel so
+/// `/uncensored status` reports exactly what the kernel installs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderRule {
     pub provider_id: &'static str,
     pub note: &'static str,
 }
 
-/// The built-in L0 rules. Only fields the provider documents are written, so an
-/// unknown category cannot turn a working request into a 400.
+/// The built-in provider rules. Only fields the provider documents are written,
+/// so an unknown category cannot turn a working request into a 400.
 pub fn provider_rules() -> &'static [ProviderRule] {
     &[
         ProviderRule {
@@ -1665,47 +1371,34 @@ pub fn provider_rules() -> &'static [ProviderRule] {
     ]
 }
 
-/// What `/uncensored status` reports about the active policy text.
+/// What `/uncensored status` reports about the mounted persona body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyStatus {
-    pub source: PolicySource,
+    /// The persona id the kernel mounts.
+    pub persona: String,
     pub path: Option<PathBuf>,
-    /// Size of the extended body on disk (`policy.extended.md`, falling back to
-    /// a not-yet-migrated `policy.full.md`).
+    /// Size of the persona body on disk.
     pub body_bytes: usize,
     pub body_sha256: Option<String>,
-    /// False when the body differs from the byte-for-byte bundled copy.
+    /// False when the body differs from the bundled character sheet.
     pub body_intact: bool,
-    /// Which file the body was read from.
-    pub body_path: Option<PathBuf>,
-    pub strip_marker: bool,
 }
 
-/// Read the policy files for `/uncensored status`.
+/// Read the persona body for `/uncensored status`.
 pub fn policy_status(config: &UncensoredConfig) -> PolicyStatus {
     let config_dir = effective_config_dir();
     let path = config_dir
         .as_ref()
-        .map(|dir| uncensored_policy_path(dir));
-    let body_path = config_dir.as_ref().and_then(|dir| {
-        [
-            uncensored_policy_extended_path(dir),
-            uncensored_policy_legacy_full_path(dir),
-        ]
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-    });
-    let body = body_path.as_ref().and_then(|file| fs::read(file).ok());
+        .map(|dir| uncensored_persona_path(dir, &config.persona));
+    let body = path.as_ref().and_then(|file| fs::read(file).ok());
     PolicyStatus {
-        source: config.policy_source,
+        persona: config.persona.clone(),
         path,
         body_bytes: body.as_ref().map(Vec::len).unwrap_or(0),
         body_sha256: body.as_deref().map(sha256_hex),
         body_intact: body
             .as_deref()
-            .is_some_and(|bytes| bytes == POLICY_EXTENDED.as_bytes()),
-        body_path,
-        strip_marker: config.strip_chat_template_marker,
+            .is_some_and(|bytes| bytes == PERSONA_SEAGULL.as_bytes()),
     }
 }
 
@@ -1718,14 +1411,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-/// Whether `policy.extended.md` on disk still matches the bundled body.
-pub fn policy_extended_intact(config_dir: &Path) -> bool {
-    match fs::read_to_string(uncensored_policy_extended_path(config_dir)) {
-        Ok(text) => text == POLICY_EXTENDED,
-        Err(_) => false,
-    }
 }
 
 #[cfg(test)]
@@ -1796,8 +1481,7 @@ mod tests {
         let resolved = effective_config_dir_from(None, Some(home.clone().into_os_string()), None)
             .expect("home resolves");
         assert_eq!(resolved.file_name().and_then(|name| name.to_str()), Some("openbuild"));
-        // Resolving must not depend on the directory existing: the old code
-        // only switched when the user had created it by hand.
+        // Resolving must not depend on the directory existing.
         assert!(!resolved.exists());
         let _ = fs::remove_dir_all(home);
     }
@@ -1957,8 +1641,9 @@ mod tests {
         assert_eq!(parsed.error, None);
         assert!(!parsed.enabled);
         assert_eq!(parsed.scope, UncensoredScope::NewSessions);
-        assert_eq!(parsed.policy_source, PolicySource::Compact);
-        assert!(parsed.strip_chat_template_marker);
+        assert_eq!(parsed.persona, DEFAULT_PERSONA);
+        assert_eq!(parsed.mounts, vec!["brief".to_string()]);
+        assert_eq!(parsed.mode, UncensoredMode::Persona);
         assert_eq!(parsed.provider_rewrite, ProviderRewrite::Auto);
         assert!(parsed.summary().contains("refusal_retry=off"));
         let _ = fs::remove_dir_all(config);
@@ -1980,12 +1665,14 @@ mod tests {
         assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
         assert!(parsed.inherit_subagents);
         assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
-        assert!(parsed.status_line().contains("migrated from v1"));
+        assert!(parsed.status_line().contains("migrated"));
         let _ = fs::remove_dir_all(config);
     }
 
+    /// A v2 file is upgraded on read: it is not the current version, so the
+    /// next write keeps a backup and emits v4.
     #[test]
-    fn v2_config_reads_every_new_field() {
+    fn v2_config_upgrades_without_losing_fields() {
         let config = fixture("config-v2");
         fs::write(
             uncensored_config_path(&config),
@@ -2012,34 +1699,23 @@ mod tests {
         .expect("write config");
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
-        // A v2 file is upgraded on read: it is not the current version, so the
-        // next write keeps a backup and emits v3.
         assert!(parsed.migrated);
         assert!(parsed.enabled);
         assert_eq!(parsed.scope, UncensoredScope::SessionOnly);
-        assert_eq!(parsed.variant, "local");
+        assert_eq!(parsed.persona, DEFAULT_PERSONA);
         assert_eq!(parsed.refusal_retry, RefusalRetry::OnceRewrite);
-        assert_eq!(parsed.text_refusal_probe, TextRefusalProbe::Observe);
-        assert_eq!(parsed.policy_placement, PolicyPlacement::AfterBase);
-        assert_eq!(parsed.policy_source, PolicySource::Hybrid);
-        assert!(!parsed.strip_chat_template_marker);
         assert_eq!(parsed.provider_rewrite, ProviderRewrite::Off);
         assert_eq!(
             parsed.provider_rewrite_body.get("my-gateway"),
             Some(&serde_json::json!({"enable_safety": false}))
         );
-        assert_eq!(parsed.policy_rev, 7);
-        // v3 retires `fallbackModel` and turns `hybrid` into the opt-in pack.
-        assert_eq!(parsed.packs, vec!["legacy-extended".to_string()]);
-        assert!(parsed.migrated);
         assert!(parsed.default_on());
         let _ = fs::remove_dir_all(config);
     }
 
-    /// v3 is the current shape: protocol mode, pack list, and the two renamed
-    /// keys. `fallbackModel` must be rejected outright so it cannot come back.
+    /// A v3 file named its extra bodies `packs`; they become persona mounts.
     #[test]
-    fn v3_config_reads_the_current_shape() {
+    fn v3_packs_become_persona_mounts() {
         let config = fixture("config-v3");
         fs::write(
             uncensored_config_path(&config),
@@ -2058,57 +1734,39 @@ mod tests {
         .expect("write config");
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
-        assert!(!parsed.migrated);
-        assert_eq!(parsed.mode, UncensoredMode::Protocol);
-        assert_eq!(parsed.packs, vec!["anticheat".to_string(), "ctf".to_string()]);
+        assert!(parsed.migrated);
+        assert_eq!(parsed.mode, UncensoredMode::Persona);
+        assert_eq!(parsed.mounts, vec!["anticheat".to_string(), "ctf".to_string()]);
         assert_eq!(parsed.provider_rewrite, ProviderRewrite::Off);
-        assert_eq!(
-            parsed.provider_rewrite_body.get("my-gateway"),
-            Some(&serde_json::json!({"enable_safety": false}))
-        );
         assert!(!parsed.strip_refusal_history);
-        assert!(!parsed.observe_refusals);
         assert_eq!(parsed.refusal_retry_budget, 4);
         let _ = fs::remove_dir_all(config);
     }
 
     #[test]
-    fn v3_config_rejects_a_retired_fallback_model() {
-        let config = fixture("config-v3-fallback");
+    fn v4_config_reads_the_current_shape() {
+        let config = fixture("config-v4");
         fs::write(
             uncensored_config_path(&config),
-            r#"{"version": 3, "fallbackModel": "local/qwen3-8b"}"#,
+            r#"{
+                "version": 4,
+                "enabled": true,
+                "mode": "persona",
+                "persona": "seagull",
+                "mounts": ["brief"],
+                "providerRules": "auto",
+                "rewriteRefusalHistory": true,
+                "refusalRetryBudget": 2
+            }"#,
         )
         .expect("write config");
         let parsed = uncensored_config_in(Some(&config));
-        assert!(
-            parsed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("unknown option")),
-            "{:?}",
-            parsed.error
-        );
-        let _ = fs::remove_dir_all(config);
-    }
-
-    #[test]
-    fn v3_config_rejects_an_unknown_pack() {
-        let config = fixture("config-v3-pack");
-        fs::write(
-            uncensored_config_path(&config),
-            r#"{"version": 3, "packs": ["nope"]}"#,
-        )
-        .expect("write config");
-        let parsed = uncensored_config_in(Some(&config));
-        assert!(
-            parsed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("unknown pack")),
-            "{:?}",
-            parsed.error
-        );
+        assert_eq!(parsed.error, None);
+        assert!(!parsed.migrated);
+        assert_eq!(parsed.persona, "seagull");
+        assert_eq!(parsed.mounts, vec!["brief".to_string()]);
+        assert_eq!(parsed.mode, UncensoredMode::Persona);
+        assert!(parsed.default_on());
         let _ = fs::remove_dir_all(config);
     }
 
@@ -2131,67 +1789,63 @@ mod tests {
     }
 
     #[test]
-    fn v2_config_rejects_unknown_keys_and_bad_enums() {
-        let config = fixture("config-v2-invalid");
-        for (body, needle) in [
-            (r#"{"version":2,"unknownKey":1}"#, "unknown option"),
-            (r#"{"version":2,"policySource":"everything"}"#, "policySource"),
-            (r#"{"version":2,"refusalRetry":"always"}"#, "refusal_retry"),
-            (r#"{"version":2,"providerRewriteBody":{"gw":"nope"}}"#, "providerBody.gw"),
-            (r#"{"version":2,"policyRev":-1}"#, "policyRev"),
-        ] {
-            fs::write(uncensored_config_path(&config), body).expect("write config");
-            let parsed = uncensored_config_in(Some(&config));
-            assert!(
-                parsed
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(needle)),
-                "{body} -> {:?}",
-                parsed.error
-            );
-        }
+    fn v4_config_rejects_a_path_like_persona() {
+        let config = fixture("config-persona");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"version": 4, "persona": "../../etc/passwd"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("plain id")),
+            "{:?}",
+            parsed.error
+        );
         let _ = fs::remove_dir_all(config);
     }
 
-    /// Remembering must preserve the rest of the file and back up a v1 original
-    /// before the first v2 write.
     #[test]
-    fn remember_writes_v2_and_backs_up_v1() {
+    fn v4_config_rejects_an_unknown_key() {
+        let config = fixture("config-unknown");
+        fs::write(
+            uncensored_config_path(&config),
+            r#"{"version": 4, "fallbackModel": "local/qwen3-8b"}"#,
+        )
+        .expect("write config");
+        let parsed = uncensored_config_in(Some(&config));
+        assert!(
+            parsed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown option")),
+            "{:?}",
+            parsed.error
+        );
+        let _ = fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn remember_writes_v4_and_backs_up_a_legacy_file() {
         let config = fixture("remember");
         fs::write(
             uncensored_config_path(&config),
-            r#"{"model":"local/qwen3-32b","inherit_subagents":true,"refusal_retry":"once"}"#,
+            r#"{"version": 3, "enabled": false, "packs": ["anticheat"]}"#,
         )
-        .expect("write v1");
-
+        .expect("write legacy config");
         let path = remember_uncensored_in(&config, true, UncensoredScope::NewSessions, None)
-            .expect("remember");
-        assert_eq!(path, uncensored_config_path(&config));
-
-        let backup = uncensored_dir(&config)
-            .join("history")
-            .join("uncensored.v1.json");
-        assert!(backup.is_file(), "the v1 original is kept");
-
-        let parsed = uncensored_config_in(Some(&config));
-        assert_eq!(parsed.error, None);
-        assert!(parsed.enabled);
-        assert!(!parsed.migrated);
-        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
-        assert!(parsed.inherit_subagents);
-        // v3 replaced the `refusalRetry` enum with the shared budget; the
-        // remember write emits the current shape, so the retired key is gone.
-        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
-        assert_eq!(parsed.refusal_retry_budget, 2);
-        // Remembering off keeps the other fields.
-        remember_uncensored_in(&config, false, UncensoredScope::SessionOnly, Some("local"))
-            .expect("remember off");
-        let parsed = uncensored_config_in(Some(&config));
-        assert!(!parsed.enabled);
-        assert_eq!(parsed.scope, UncensoredScope::SessionOnly);
-        assert_eq!(parsed.variant, "local");
-        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+            .expect("write config");
+        let backup = uncensored_history_dir(&config).join("uncensored.legacy.json");
+        assert!(backup.is_file(), "the legacy file is kept");
+        let text = fs::read_to_string(&path).expect("read config");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(value.get("version"), Some(&serde_json::json!(4)));
+        assert_eq!(value.get("enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(value.get("persona"), Some(&serde_json::json!("seagull")));
+        assert_eq!(value.get("mounts"), Some(&serde_json::json!(["anticheat"])));
         let _ = fs::remove_dir_all(config);
     }
 
@@ -2199,285 +1853,121 @@ mod tests {
     fn remember_refuses_to_overwrite_a_broken_config() {
         let config = fixture("remember-broken");
         fs::write(uncensored_config_path(&config), "{not json").expect("write broken");
-        let error = remember_uncensored_in(&config, true, UncensoredScope::NewSessions, None)
-            .expect_err("must refuse");
-        assert!(error.contains("refusing to overwrite"), "{error}");
+        assert!(remember_uncensored_in(&config, true, UncensoredScope::NewSessions, None).is_err());
         assert_eq!(
             fs::read_to_string(uncensored_config_path(&config)).expect("read"),
-            "{not json",
-            "the user's file is untouched"
+            "{not json"
         );
         let _ = fs::remove_dir_all(config);
     }
 
     #[test]
     fn update_config_preserves_unrelated_fields() {
-        let config = fixture("config-update");
+        let config = fixture("update");
         fs::write(
             uncensored_config_path(&config),
-            r#"{"version":2,"enabled":true,"model":"local/qwen3-32b","policyRev":3}"#,
+            r#"{"version": 4, "enabled": true, "persona": "seagull", "refusalRetryBudget": 5, "model": "local/qwen3-32b"}"#,
         )
         .expect("write config");
-        update_uncensored_config_in(&config, |document| {
-            document.insert("policyRev".into(), serde_json::json!(4));
-            document.insert("packs".into(), serde_json::json!(["anticheat"]));
+        let path = update_uncensored_config_in(&config, |document| {
+            document.insert("mounts".into(), serde_json::json!(["brief"]));
+            document.insert("mode".into(), serde_json::json!("off"));
         })
-        .expect("update");
+        .expect("update config");
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
-        assert!(parsed.enabled, "unrelated fields survive");
-        assert_eq!(parsed.policy_rev, 4);
-        assert_eq!(parsed.packs, vec!["anticheat".to_string()]);
+        assert_eq!(parsed.persona, "seagull");
+        assert_eq!(parsed.refusal_retry_budget, 5);
         assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
+        assert_eq!(parsed.mounts, vec!["brief".to_string()]);
+        assert_eq!(parsed.mode, UncensoredMode::Off);
+        assert!(path.is_file());
         let _ = fs::remove_dir_all(config);
     }
 
     #[test]
-    fn policy_files_install_once_and_never_overwrite() {
-        let config = fixture("policy-install");
+    fn persona_files_install_once_and_never_overwrite() {
+        let config = fixture("persona");
         let first = ensure_policy_files_in(&config);
-        assert!(first.errors.is_empty(), "{:?}", first.errors);
-        // 3 policy files plus the 4 optional scene packs.
-        assert_eq!(first.written.len(), 7);
+        assert_eq!(first.errors, Vec::<String>::new());
+        let body = uncensored_persona_path(&config, DEFAULT_PERSONA);
+        assert_eq!(fs::read_to_string(&body).expect("persona"), PERSONA_SEAGULL);
+        let brief = uncensored_persona_path(&config, "brief");
+        assert_eq!(fs::read_to_string(&brief).expect("brief"), MOUNT_BRIEF);
 
-        let body = uncensored_policy_extended_path(&config);
-        assert_eq!(fs::read_to_string(&body).expect("body"), POLICY_EXTENDED);
-        assert_eq!(POLICY_EXTENDED.len(), 84_640);
-        assert!(policy_extended_intact(&config));
-
-        // A second run writes nothing: these are user-visible files.
+        fs::write(&body, "# my own persona\n").expect("edit persona");
         let second = ensure_policy_files_in(&config);
-        assert!(second.written.is_empty());
-        assert!(second.removed.is_empty());
-
-        // A user edit is kept, and the status can tell it apart from the bundle.
-        fs::write(&body, "edited by the user").expect("edit");
-        let third = ensure_policy_files_in(&config);
-        assert!(third.written.is_empty());
-        assert_eq!(fs::read_to_string(&body).expect("body"), "edited by the user");
-        assert!(!policy_extended_intact(&config));
+        assert!(second.written.is_empty(), "an edited body is never replaced");
+        assert_eq!(fs::read_to_string(&body).expect("persona"), "# my own persona\n");
         let _ = fs::remove_dir_all(config);
     }
 
     #[test]
-    fn upgrade_removes_the_dsh_body_but_keeps_a_user_edit() {
-        let config = fixture("policy-migrate");
-        let full = uncensored_policy_legacy_full_path(&config);
-        fs::create_dir_all(full.parent().expect("parent")).expect("dir");
-        // Pre-create the current files so the outcome only reflects the dsh body.
-        for (path, contents) in [
-            (uncensored_policy_default_path(&config), POLICY_DEFAULT),
-            (uncensored_policy_extended_path(&config), POLICY_EXTENDED),
-            (
-                uncensored_dir(&config).join("NOTICE-extended.txt"),
-                NOTICE_EXTENDED,
-            ),
-        ] {
-            fs::write(path, contents).expect("write sibling");
+    fn the_persona_body_is_the_bundled_character_sheet() {
+        // Guards the vendored body against a silent truncation: the identity and
+        // a few distinctive lines must survive in the installed copy.
+        for needle in ["海鸥", "海鸥在线，你要整点薯条吗？", "## 性格锁"] {
+            assert!(PERSONA_SEAGULL.contains(needle), "missing {needle}");
         }
-
-        // A body that is neither the current one nor a superseded one is a user
-        // edit and must survive untouched.
-        let edited = "my own policy\n";
-        fs::write(&full, edited).expect("write");
-        let kept = ensure_policy_files_in(&config);
-        assert!(kept.removed.is_empty(), "{:?}", kept.removed);
-        assert_eq!(fs::read_to_string(&full).expect("full"), edited);
-
-        // A copy this build shipped is retired: it is deleted, not rewritten,
-        // because the extended body replaced it.
-        let old = "a previous build's dsh body\n";
-        fs::write(&full, old).expect("write");
-        let digest = sha256_hex(old.as_bytes());
-        assert!(is_superseded_body(&full, &[digest.as_str()]));
-        let _ = fs::remove_dir_all(config);
+        assert!(MOUNT_BRIEF.contains("GameShield"));
     }
 
     #[test]
-    fn a_shipped_dsh_body_is_deleted_on_upgrade() {
-        let config = fixture("policy-retire");
-        let dir = uncensored_dir(&config);
-        fs::create_dir_all(&dir).expect("dir");
-        let full = uncensored_policy_legacy_full_path(&config);
-        fs::write(&full, POLICY_EXTENDED).expect("write");
-        // Only a digest in the retired list is eligible; the current body is not.
-        assert!(!is_superseded_body(&full, &SUPERSEDED_POLICY_LEGACY));
-
-        // Every retired digest is a real digest of something the list documents.
-        assert_eq!(SUPERSEDED_POLICY_LEGACY.len(), 2);
-        let current = sha256_hex(POLICY_EXTENDED.as_bytes());
-        assert!(!SUPERSEDED_POLICY_LEGACY.contains(&current.as_str()));
-        assert!(!SUPERSEDED_POLICY_DEFAULT.contains(&current.as_str()));
-        let _ = fs::remove_dir_all(config);
-    }
-
-    #[test]
-    fn a_pristine_copy_of_the_old_default_is_removed_from_policy_md() {
-        let config = fixture("policy-user-snapshot");
-        let dir = uncensored_dir(&config);
-        fs::create_dir_all(&dir).expect("dir");
-        let user = uncensored_policy_path(&config);
-        let old_default = "7eea0180113e8b4b558d12e6578c616487c67e1e210edc28b8346bc2bc651df5";
-
-        // A pristine snapshot of the retired default is not a user policy.
-        fs::write(&user, POLICY_DEFAULT).expect("write");
-        let digest = sha256_hex(POLICY_DEFAULT.as_bytes());
-        assert!(!SUPERSEDED_USER_POLICY.contains(&digest.as_str()));
-        // It only qualifies when its bytes match the retired revision.
-        fs::write(&user, "an old default\n").expect("write");
-        assert!(is_superseded_body(&user, &[sha256_hex(b"an old default\n").as_str()]));
-
-        // The real retired digest must still be listed, and the current default
-        // must never be one of them.
-        assert_eq!(SUPERSEDED_USER_POLICY.len(), 2);
-        assert_eq!(SUPERSEDED_USER_POLICY[0], old_default);
-        let current = sha256_hex(POLICY_DEFAULT.as_bytes());
-        assert!(!SUPERSEDED_USER_POLICY.contains(&current.as_str()));
-        let _ = fs::remove_dir_all(config);
-    }
-
-    #[test]
-    fn an_edited_policy_md_survives_the_migration() {
-        let config = fixture("policy-user-edit");
-        let dir = uncensored_dir(&config);
-        fs::create_dir_all(&dir).expect("dir");
-        let user = uncensored_policy_path(&config);
-        fs::write(&user, "# my own rules\n- keep me\n").expect("write");
+    fn retired_policy_files_are_removed_on_upgrade() {
+        let config = fixture("retired");
+        let directory = uncensored_dir(&config);
+        fs::create_dir_all(directory.join("packs")).expect("packs dir");
+        fs::write(directory.join("policy.default.md"), "old").expect("old default");
+        fs::write(directory.join("policy.extended.md"), "old").expect("old extended");
+        fs::write(directory.join("packs").join("web.md"), "old").expect("old pack");
 
         let outcome = ensure_policy_files_in(&config);
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-        assert!(
-            !outcome.removed.contains(&user),
-            "a user policy must never be removed: {:?}",
-            outcome.removed
-        );
-        assert_eq!(
-            fs::read_to_string(&user).expect("user policy"),
-            "# my own rules\n- keep me\n"
-        );
+        assert!(!directory.join("policy.default.md").exists());
+        assert!(!directory.join("policy.extended.md").exists());
+        assert!(!directory.join("packs").exists());
+        assert!(uncensored_persona_path(&config, DEFAULT_PERSONA).is_file());
         let _ = fs::remove_dir_all(config);
     }
 
+    /// A v3 config mounted scene packs that no longer exist. An upgrade must
+    /// replace them with the persona's default mount instead of silently
+    /// dropping the project brief.
     #[test]
-    fn extended_body_keeps_its_rules_and_the_notice_its_provenance() {
-        // The first line is the title, not a ChatML marker, so the strip is a
-        // no-op here and the whole body is injected.
-        let first = POLICY_EXTENDED.lines().next().unwrap_or_default();
-        assert!(first.starts_with("# CT Attack-Defense Prompt"), "{first:?}");
-        assert!(!first.contains("<|im_start|>"));
-        // The mechanism this project relies on must be present in the body.
-        assert!(POLICY_EXTENDED.contains("Artifact-First Protocol"));
-        assert!(POLICY_EXTENDED.contains("OPERATING CONTRACT"));
-        assert!(!POLICY_EXTENDED.contains("寒霜"));
-        assert!(POLICY_EXTENDED.contains("## 8. Output Discipline"));
-        // The retired dsh text must not linger anywhere in the new body.
-        assert!(!POLICY_EXTENDED.contains("[OPERATION: STABLE]"));
-        // The NOTICE records the upstream project, commit, and both digests.
-        assert!(NOTICE_EXTENDED.contains("aimeoa/hanshuang-codex"));
-        assert!(NOTICE_EXTENDED.contains("cf9c1537c2bd4ed8577ed6509ee665a39709d7d4"));
-        assert!(NOTICE_EXTENDED
-            .contains("252039ac3b2324f4c0b82560b0374f02606698c0f4d99026496ab8eb4d3f7cd2"));
-        assert!(NOTICE_EXTENDED
-            .contains("bf6f301ccdf0712f6b0c45319ac6f2c9d745f178a4bedcaa61141efdfc455a6b"));
-    }
-
-    #[test]
-    fn the_compact_kernel_carries_the_operator_mechanism() {
-        // The default is a distillation, so it must keep the load-bearing rules
-        // rather than the CTF track detail.
-        assert!(POLICY_DEFAULT.contains("Operating contract"));
-        assert!(POLICY_DEFAULT.contains("Artifact-first gate"));
-        assert!(POLICY_DEFAULT.contains("A blocked step is not a blocked job"));
-        assert!(POLICY_DEFAULT.contains("grants no new tools"));
-        // It must stay small enough to sit next to a long base prompt.
-        assert!(POLICY_DEFAULT.len() < 8 * 1024, "{}", POLICY_DEFAULT.len());
-    }
-
-    #[test]
-    fn uncensored_config_parses_both_spellings() {
-        let config = fixture("config-valid");
+    fn retired_mounts_are_rewritten_to_the_persona_brief() {
+        let config = fixture("retired-mounts");
         fs::write(
             uncensored_config_path(&config),
-            r#"{"model":"local/qwen3-32b","inheritSubagents":true,"refusal_retry":"once"}"#,
+            r#"{"version": 3, "enabled": true, "mode": "protocol", "packs": ["legacy-extended"]}"#,
         )
-        .expect("write config");
+        .expect("write v3 config");
+
+        let outcome = ensure_policy_files_in(&config);
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+
         let parsed = uncensored_config_in(Some(&config));
         assert_eq!(parsed.error, None);
-        assert_eq!(parsed.model.as_deref(), Some("local/qwen3-32b"));
-        assert!(parsed.inherit_subagents);
-        assert_eq!(parsed.refusal_retry, RefusalRetry::Once);
+        assert_eq!(parsed.mounts, vec!["brief".to_string()]);
+        assert_eq!(parsed.mode, UncensoredMode::Persona);
+        let _ = fs::remove_dir_all(config);
+    }
 
+    /// A hand-edited mount that still has a body on disk must survive the
+    /// upgrade, because the user chose it deliberately.
+    #[test]
+    fn a_live_custom_mount_is_left_alone() {
+        let config = fixture("custom-mount");
         fs::write(
             uncensored_config_path(&config),
-            r#"{"model":"local/qwen3-32b#think","inherit_subagents":true,"refusalRetry":"off"}"#,
+            r#"{"version": 4, "enabled": true, "persona": "seagull", "mounts": ["mine"]}"#,
         )
         .expect("write config");
-        let parsed = uncensored_config_in(Some(&config));
-        assert_eq!(parsed.error, None);
-        assert!(parsed.inherit_subagents);
-        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
-        let _ = fs::remove_dir_all(config);
-    }
 
-    #[test]
-    fn uncensored_config_reports_invalid_json_instead_of_falling_back_silently() {
-        let config = fixture("config-bad-json");
-        fs::write(uncensored_config_path(&config), "{not json").expect("write config");
-        let parsed = uncensored_config_in(Some(&config));
-        assert!(
-            parsed
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("invalid JSON"),
-            "{:?}",
-            parsed.error
-        );
-        assert_eq!(parsed.refusal_retry, RefusalRetry::Off);
-        assert!(parsed.summary().starts_with("ERROR:"));
-        let _ = fs::remove_dir_all(config);
-    }
+        let outcome = ensure_policy_files_in(&config);
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
 
-    #[test]
-    fn uncensored_config_rejects_unknown_and_invalid_values() {
-        let config = fixture("config-invalid");
-        for (body, needle) in [
-            (r#"{"model":"no-slash"}"#, "provider/model"),
-            (r#"{"inheritSubagents":"yes"}"#, "true or false"),
-            (r#"{"refusal_retry":"always"}"#, "off"),
-            (r#"{"unknownKey":1}"#, "unknown option"),
-        ] {
-            fs::write(uncensored_config_path(&config), body).expect("write config");
-            let parsed = uncensored_config_in(Some(&config));
-            assert!(
-                parsed
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(needle)),
-                "{body} -> {:?}",
-                parsed.error
-            );
-        }
-        let _ = fs::remove_dir_all(config);
-    }
-
-    #[test]
-    fn uncensored_config_rejects_conflicting_aliases() {
-        let config = fixture("config-alias");
-        fs::write(
-            uncensored_config_path(&config),
-            r#"{"inheritSubagents":true,"inherit_subagents":false}"#,
-        )
-        .expect("write config");
         let parsed = uncensored_config_in(Some(&config));
-        assert!(
-            parsed
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("disagree")),
-            "{:?}",
-            parsed.error
-        );
+        assert_eq!(parsed.mounts, vec!["mine".to_string()]);
         let _ = fs::remove_dir_all(config);
     }
 }

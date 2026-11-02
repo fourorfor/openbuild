@@ -13,7 +13,7 @@ import { SnowflakeCortexPlugin } from "@opencode/core/plugin/provider/snowflake-
 import { Provider } from "@opencode/core/provider"
 import { Session } from "@opencode/core/session"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
-import { SessionProtocolPolicy } from "@opencode/core/session/protocol-policy"
+import { SessionAgentPersona } from "@opencode/core/session/agent-persona"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { expect } from "bun:test"
 import { Effect, Layer, Schedule, Stream } from "effect"
@@ -91,7 +91,7 @@ const fixture = Effect.fn(function* () {
       Effect.provideService(HttpClient.HttpClient, http),
     )
   }).pipe(Effect.provide(SessionModelRequest.layer),
-          Effect.provide(SessionProtocolPolicy.testLayer), Effect.provide(ModelResolver.layer))
+          Effect.provide(SessionAgentPersona.testLayer), Effect.provide(ModelResolver.layer))
   const stop = Effect.gen(function* () {
     replies.push(Response.json({ message: "Conversation complete", error: {} }, { status: 400 }))
     expect((yield* send).find((event) => event.type === "finish")?.reason.normalized).toBe("stop")

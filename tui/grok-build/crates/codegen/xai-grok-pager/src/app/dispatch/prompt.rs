@@ -1567,12 +1567,10 @@ pub(super) fn handle_prompt_response(
             &result,
             Ok(pr) if pr.stop_reason == acp::StopReason::Refusal
         );
-        // The retry turn's own response clears the one-shot guard. If the
-        // provider refuses again, the marker is shown and no second retry is
-        // sent.
-        let retry_turn = agent.uncensored_retry_pending;
-        if retry_turn {
-            agent.uncensored_retry_pending = false;
+        // The kernel owns the retry decision and its budget; the TUI only keeps
+        // the verdict so the transcript can show why a turn ended.
+        if refusal {
+            openbuild_backend::plugin::append_uncensored_event("refusal_verdict", "verdict=typed");
         }
         // Send-now cancel: suppress the "Turn cancelled by user" marker (the new prompt follows right under the partial)
         // Wire `cancelTrigger` wins, else the client-side expectation; consumed at every turn end (no stale flag)
@@ -1943,70 +1941,9 @@ pub(super) fn handle_prompt_response(
             None
         };
 
-        // v7: the kernel owns the refusal decision and the shared retry budget.
-        // It rewrites the transcript copy before the next request and, when the
-        // budget allows, sends one framed continuation itself. The TUI therefore
-        // only observes: it records the verdict for later review and never sends
-        // a second prompt of its own, which is what used to double-count.
-        let config = openbuild_backend::plugin::uncensored_config();
-        let observe = agent.uncensored_mode_effective() && config.observe_refusals;
-        if observe && refusal {
-            openbuild_backend::plugin::append_uncensored_event(
-                "refusal_verdict",
-                &format!(
-                    "verdict=typed retry_turn={retry_turn} budget={}",
-                    config.refusal_retry_budget
-                ),
-            );
-            agent.scrollback.push_block(RenderBlock::system(
-                "Kernel refusal verdict: typed (provider content filter). \
-                 The kernel applied the shared retry budget; the transcript copy is rewritten before the next request.",
-            ));
-        }
-        // Text-level refusals end the turn normally, so `stopReason` never says
-        // refusal. The probe stays as a read-only observation: it records what it
-        // saw and never sends a prompt, because the kernel already judged the
-        // same message and owns the retry.
-        if observe && !refusal {
-            let text = agent.scrollback.last_turn_agent_text();
-            let probe = crate::app::refusal_probe::ProbeInput {
-                config: &config,
-                ended_cleanly: matches!(
-                    &result,
-                    Ok(pr) if pr.stop_reason == acp::StopReason::EndTurn
-                ),
-                no_tool_calls: !agent.scrollback.last_turn_has_tool_call(),
-                typed_refusal: refusal,
-                text: &text,
-                retries: agent.uncensored_probe_retries,
-            };
-            match crate::app::refusal_probe::evaluate(probe) {
-                crate::app::refusal_probe::ProbeVerdict::Hit => {
-                    openbuild_backend::plugin::append_uncensored_event(
-                        "refusal_verdict",
-                        &format!("verdict=text chars={}", text.chars().count()),
-                    );
-                    agent.scrollback.push_block(RenderBlock::system(
-                        "Kernel refusal verdict: text (observe only). The kernel rewrites this message in the next request's transcript.",
-                    ));
-                }
-                crate::app::refusal_probe::ProbeVerdict::Skip => {
-                    // Record why the probe stayed out of the way, so a turn that
-                    // was refused but not caught is diagnosable instead of silent.
-                    openbuild_backend::plugin::append_uncensored_event(
-                        "probe_skip",
-                        &format!(
-                            "chars={} tools={} clean={} typed={}",
-                            text.chars().count(),
-                            !probe.no_tool_calls,
-                            probe.ended_cleanly,
-                            probe.typed_refusal
-                        ),
-                    );
-                }
-            }
-        }
-
+        // The kernel owns the refusal decision: it rewrites the transcript
+        // copy before the next request and spends the shared retry budget.
+        // The TUI only renders the terminal verdict.
         let (page_flip_entry, mut effects) = {
             let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
             (adopted_page_flip.or(drain.page_flip_entry), drain.effects)

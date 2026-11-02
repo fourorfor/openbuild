@@ -727,7 +727,7 @@ pub enum Action {
     /// Set plan mode on/off. Per-session, ACP-mediated (not persisted to config.toml).
     /// `/plan <desc>` uses `EnterPlanMode` instead because it also starts a turn.
     SetPlanMode(PlanModeKind),
-    /// Switch this session to the optional direct content policy (H).
+    /// Switch this session to the installed persona agent (H).
     /// Session-scoped; never changes the permission mode.
     SetUncensoredMode(bool),
     /// Apply a `/uncensored` menu answer: switch this session and optionally
@@ -736,21 +736,20 @@ pub enum Action {
         on: bool,
         remember: bool,
     },
+    /// Menu row 0: flip the mode without changing the remembered default.
+    UncensoredToggleClicked,
+    /// Menu row 1: flip the remembered default, keeping the session mode.
+    UncensoredRememberToggled,
     /// Open the `/uncensored` option menu as a local modal.
     OpenUncensoredMenu,
-    /// Open the policy-mode step directly, for `/uncensored on`: the user already
-    /// said "on", so only the strength is left to choose.
-    OpenUncensoredPolicyMenu,
-    /// Apply a pack answer from the second `/uncensored` step.
-    UncensoredPolicyAnswered {
-        legacy_extended: bool,
-    },
-    /// Show `/uncensored status`: mode, model, and installed plugin state.
+    /// Show `/uncensored status`: mode, mounted persona, and installed plugin state.
     ShowUncensoredStatus,
-    /// `/uncensored pack <id>`: replace the mounted scene packs.
-    SetUncensoredPacks {
-        packs: Vec<String>,
+    /// `/uncensored persona <id>`: mount another persona body.
+    SetUncensoredPersona {
+        persona: String,
     },
+    /// `/uncensored edit`: open the persona body in `$EDITOR`.
+    EditUncensoredPersona,
     /// `/login`: open the third-party provider setup wizard.
     OpenProviderSetup,
     /// `/login status`: show providers this wizard configured.

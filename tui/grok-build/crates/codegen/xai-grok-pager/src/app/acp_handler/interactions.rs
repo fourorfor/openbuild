@@ -179,7 +179,6 @@ pub(crate) fn handle_ask_user_question(
                         LocalQuestionKind::DeleteCurrentSession => "/delete",
                         LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
                         LocalQuestionKind::UncensoredMenu => "/uncensored",
-                        LocalQuestionKind::UncensoredPolicyMenu => "/uncensored policy",
                         // The dedicated arm above owns this variant; the label is kept for exhaustiveness
                         LocalQuestionKind::PromptBlocked { .. } => "blocked prompt",
                     };

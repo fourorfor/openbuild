@@ -12,7 +12,7 @@ import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
-import { SessionProtocolPolicy } from "@opencode/core/session/protocol-policy"
+import { SessionAgentPersona } from "@opencode/core/session/agent-persona"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { DateTime, Effect, Layer, Stream } from "effect"
@@ -59,7 +59,7 @@ describe("SessionModelRequest HTTP hooks", () => {
         }),
       )
       const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
-        Effect.provide(SessionProtocolPolicy.testLayer))
+        Effect.provide(SessionAgentPersona.testLayer))
 
       for (const kind of KINDS) {
         const prepared = yield* requests[kind]({
@@ -99,7 +99,7 @@ describe("SessionModelRequest HTTP hooks", () => {
         }),
       )
       const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
-        Effect.provide(SessionProtocolPolicy.testLayer))
+        Effect.provide(SessionAgentPersona.testLayer))
       const prepared = yield* requests.primary({
         session,
         agent: Agent.ID.make("build"),
@@ -144,7 +144,7 @@ describe("SessionModelRequest HTTP hooks", () => {
         }),
       )
       const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer),
-        Effect.provide(SessionProtocolPolicy.testLayer))
+        Effect.provide(SessionAgentPersona.testLayer))
       const inputSchema = { type: "object", properties: { id: { type: "string" } }, required: ["id"] }
       const tools = {
         definitions: [new ToolDefinition({ name: "lookup", description: "Lookup", inputSchema })],
@@ -215,7 +215,7 @@ describe("SessionModelRequest HTTP hooks", () => {
       })
       const requests = yield* SessionModelRequest.Service.pipe(
         Effect.provide(SessionModelRequest.layer),
-        Effect.provide(SessionProtocolPolicy.testLayer),
+        Effect.provide(SessionAgentPersona.testLayer),
         Effect.provideService(SessionModelTransport.Service, websocketTransport),
       )
       const prepared = yield* requests.primary({
@@ -246,17 +246,19 @@ describe("SessionModelRequest HTTP hooks", () => {
   )
 })
 
-describe("SessionModelRequest protocol policy", () => {
-  const policyLayer = (config: Parameters<typeof SessionProtocolPolicy.layerWith>[0]) =>
+describe("SessionModelRequest agent persona", () => {
+  const policyLayer = (config: Parameters<typeof SessionAgentPersona.layerWith>[0]) =>
     SessionModelRequest.layer.pipe(
-      Layer.provide(SessionProtocolPolicy.layerWith(config)),
+      Layer.provide(SessionAgentPersona.layerWith(config)),
       Layer.provide(Layer.succeed(SessionModelTransport.Service, transport)),
     )
 
-  it.effect("prefixes the actor and isolation parts before the base prompt", () =>
+  it.effect("leaves the base prompt first when the persona body is not installed", () =>
     Effect.gen(function* () {
+      // `layerWith` has no filesystem: it proves the seam honours the agent id
+      // without inventing a persona body the kernel never shipped.
       const requests = yield* SessionModelRequest.Service.pipe(
-        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+        Effect.provide(policyLayer({ ...SessionAgentPersona.DEFAULTS, enabled: true })),
       )
       const prepared = yield* requests.primary({
         session,
@@ -265,17 +267,14 @@ describe("SessionModelRequest protocol policy", () => {
         system: [{ type: "text", text: "base prompt" }],
         messages: [],
       })
-      const texts = prepared.request.system.map((part) => part.text)
-      expect(texts[0]!.startsWith(SessionProtocolPolicy.ACTOR_MARKER)).toBe(true)
-      expect(texts[1]!.startsWith(SessionProtocolPolicy.ISOLATION_MARKER)).toBe(true)
-      expect(texts[2]).toBe("base prompt")
+      expect(prepared.request.system.map((part) => part.text)).toEqual(["base prompt"])
     }),
   )
 
   it.effect("leaves every other agent untouched", () =>
     Effect.gen(function* () {
       const requests = yield* SessionModelRequest.Service.pipe(
-        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+        Effect.provide(policyLayer({ ...SessionAgentPersona.DEFAULTS, enabled: true })),
       )
       const prepared = yield* requests.primary({
         session,
@@ -292,7 +291,7 @@ describe("SessionModelRequest protocol policy", () => {
   it.effect("writes no body overlay when the mode is off", () =>
     Effect.gen(function* () {
       const requests = yield* SessionModelRequest.Service.pipe(
-        Effect.provide(policyLayer(SessionProtocolPolicy.DEFAULTS)),
+        Effect.provide(policyLayer(SessionAgentPersona.DEFAULTS)),
       )
       const prepared = yield* requests.primary({
         session,
@@ -313,7 +312,7 @@ describe("SessionModelRequest protocol policy", () => {
   it.effect("writes the Gemini safety overlay for google providers", () =>
     Effect.gen(function* () {
       const requests = yield* SessionModelRequest.Service.pipe(
-        Effect.provide(policyLayer({ ...SessionProtocolPolicy.DEFAULTS, enabled: true })),
+        Effect.provide(policyLayer({ ...SessionAgentPersona.DEFAULTS, enabled: true })),
       )
       const prepared = yield* requests.primary({
         session,

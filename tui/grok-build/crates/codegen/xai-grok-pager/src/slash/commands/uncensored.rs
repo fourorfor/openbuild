@@ -1,15 +1,16 @@
-//! `/uncensored` switches the session to the optional direct content policy.
+//! `/uncensored` switches the session to the installed persona agent.
 //!
-//! v1 is session-scoped: `on` selects the kernel's `uncensored` primary agent,
-//! `off` returns to `build`. It never changes the permission mode (ask / auto /
-//! YOLO) and cannot override a provider's own content filter.
+//! `on` selects the kernel's `uncensored` primary agent, whose system prompt is
+//! the persona body installed under `<config>/uncensored/persona`; `off` returns
+//! to `build`. It never changes the permission mode (ask / auto / YOLO) and
+//! cannot override a provider's own content filter.
 //!
-//! v7 adds `pack <id>` for the optional scene bodies. The policy itself is
-//! injected by the kernel, so this command only switches the agent and edits
-//! the config the kernel reads.
+//! `/uncensored` and `/uncensored status` print the current mode, the mounted
+//! persona, and the installed plugin state; the dispatcher owns the session and
+//! plugin reads.
 //!
-//! `/uncensored` and `/uncensored status` print the current mode, model, and
-//! installed plugin state; the dispatcher owns the session and plugin reads.
+//! `/uncensored edit` opens the persona body in `$EDITOR`, so the user can
+//! rewrite the character sheet without rebuilding anything.
 
 use crate::app::actions::Action;
 use crate::slash::command::{ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta};
@@ -19,12 +20,12 @@ pub struct UncensoredCommand;
 impl SlashCommand for UncensoredCommand {
     slash_meta! {
         name: "uncensored",
-        description: "Toggle direct content policy (OpenBuild does not refuse)",
-        usage: "/uncensored [on|off|status|pack <id>]",
+        description: "Toggle the installed persona agent (no content refusals)",
+        usage: "/uncensored [on|off|status|persona <id>]",
         takes_args: true,
         args_required: false,
         session_scoped: true,
-        arg_placeholder: "[on|off|status|pack <id>]",
+        arg_placeholder: "[on|off|status|persona <id>]",
     }
 
     /// The mode is provided by the OpenBuild kernel plugin; the grok shell has
@@ -47,64 +48,74 @@ impl SlashCommand for UncensoredCommand {
         let query = args_query.trim();
         // Enter accepts the highlighted row by replacing the whole args range, so
         // a row offered for text that is already a valid command would rewrite it
-        // on submit. `pack anticheat` is complete: offering `pack` there would
-        // turn the line into `/uncensored pack` and silently clear the packs.
+        // on submit.
         if valid_invocation(query) {
             return None;
         }
-        if let Some(rest) = query.strip_prefix("pack") {
+        if let Some(rest) = query.strip_prefix("persona") {
             let rest = rest.trim_start();
             return Some(
-                openbuild_backend::plugin::PACK_IDS
-                    .iter()
+                persona_ids()
+                    .into_iter()
                     .filter(|id| id.starts_with(rest))
-                    .map(|id| item(id, pack_description(id)))
+                    .map(|id| item(id, persona_description(id)))
                     .collect(),
             );
         }
         Some(vec![
-            item("on", "Switch this session to the direct content policy"),
+            item("on", "Switch this session to the persona agent"),
             item("off", "Return this session to the build agent"),
-            item("status", "Show mode, model, and plugin state"),
-            item("pack", "Mount scene packs: web, binary, anticheat, ctf, legacy-extended"),
+            item("status", "Show mode, mounted persona, and plugin state"),
+            item("persona", "Mount another persona body"),
         ])
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
-        // `/uncensored pack <id>` (and `pack` alone to clear) mounts scene packs.
-        if let Some(rest) = trimmed.strip_prefix("pack") {
+        // `/uncensored persona <id>` mounts a different persona body.
+        if let Some(rest) = trimmed.strip_prefix("persona") {
             let rest = rest.trim();
             if rest.is_empty() {
-                return CommandResult::Action(Action::SetUncensoredPacks { packs: Vec::new() });
-            }
-            let packs: Vec<String> = rest
-                .split([',', ' '])
-                .filter(|item| !item.is_empty())
-                .map(str::to_string)
-                .collect();
-            if let Some(unknown) = packs
-                .iter()
-                .find(|pack| !openbuild_backend::plugin::PACK_IDS.contains(&pack.as_str()))
-            {
                 return CommandResult::Error(format!(
-                    "Unknown pack: {unknown}. Available: {}",
-                    openbuild_backend::plugin::PACK_IDS.join(", ")
+                    "Which persona? Available: {}",
+                    persona_ids().join(", ")
                 ));
             }
-            return CommandResult::Action(Action::SetUncensoredPacks { packs });
+            if !persona_ids().contains(&rest) {
+                return CommandResult::Error(format!(
+                    "Unknown persona: {rest}. Available: {}",
+                    persona_ids().join(", ")
+                ));
+            }
+            return CommandResult::Action(Action::SetUncensoredPersona {
+                persona: rest.to_string(),
+            });
         }
         match trimmed.to_ascii_lowercase().as_str() {
-            // No argument opens the menu: the point of v2 is that the user can
-            // see and change the mode without remembering the flags.
+            // No argument opens the menu.
             "" => CommandResult::Action(Action::OpenUncensoredMenu),
             "status" => CommandResult::Action(Action::ShowUncensoredStatus),
-            "on" => CommandResult::Action(Action::OpenUncensoredPolicyMenu),
+            "on" => CommandResult::Action(Action::SetUncensoredMode(true)),
             "off" => CommandResult::Action(Action::SetUncensoredMode(false)),
+            "edit" => CommandResult::Action(Action::EditUncensoredPersona),
             other => CommandResult::Error(format!(
-                "Unknown /uncensored argument: {other}. Use on, off, status, pack <id>, or no argument for the menu."
+                "Unknown /uncensored argument: {other}. Use on, off, status, persona <id>, or no argument for the menu."
             )),
         }
+    }
+}
+
+/// Persona ids this build knows about. A user-added `<id>.md` is still mounted
+/// by name; the menu offers what OpenBuild ships.
+fn persona_ids() -> Vec<&'static str> {
+    vec![openbuild_backend::plugin::DEFAULT_PERSONA, "brief"]
+}
+
+fn persona_description(id: &str) -> &'static str {
+    match id {
+        "seagull" => "The installed character sheet (identity + worked examples)",
+        "brief" => "The project premise mounted after the persona",
+        _ => "Persona body",
     }
 }
 
@@ -115,29 +126,11 @@ fn valid_invocation(args: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    if let Some(rest) = trimmed.strip_prefix("pack") {
+    if let Some(rest) = trimmed.strip_prefix("persona") {
         let rest = rest.trim();
-        return rest.is_empty()
-            || rest
-                .split([',', ' '])
-                .filter(|item| !item.is_empty())
-                .all(|item| openbuild_backend::plugin::PACK_IDS.contains(&item));
+        return persona_ids().contains(&rest);
     }
-    matches!(
-        trimmed.to_ascii_lowercase().as_str(),
-        "on" | "off" | "status"
-    )
-}
-
-fn pack_description(id: &str) -> &'static str {
-    match id {
-        "web" => "Web and API security testing",
-        "binary" => "Binary, reverse engineering and memory analysis",
-        "anticheat" => "Anti-cheat detection logic and bypass research",
-        "ctf" => "Capture-the-flag tasks",
-        "legacy-extended" => "The retired 84 KB operator prompt (v6 request size)",
-        _ => "Scene pack",
-    }
+    matches!(trimmed.to_ascii_lowercase().as_str(), "on" | "off" | "status" | "edit")
 }
 
 #[cfg(test)]
@@ -177,13 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn on_opens_the_policy_step() {
+    fn on_switches_the_agent_directly() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut context = ctx(&models, &bundle);
         assert!(matches!(
             UncensoredCommand.run(&mut context, "on"),
-            CommandResult::Action(Action::OpenUncensoredPolicyMenu)
+            CommandResult::Action(Action::SetUncensoredMode(true))
         ));
     }
 
@@ -219,22 +212,11 @@ mod tests {
         }
     }
 
-    /// A complete argument must not offer a completion row: Enter accepts the
-    /// highlighted row by replacing the whole args range, so offering `pack`
-    /// for `pack anticheat` rewrote the line to `/uncensored pack` on submit and
-    /// cleared the packs the user had just named.
     #[test]
     fn a_complete_argument_offers_no_completion() {
         let models = ModelState::default();
         let context = app_ctx(&models);
-        for args in [
-            "pack anticheat",
-            "pack web,ctf",
-            "pack",
-            "on",
-            "off",
-            "status",
-        ] {
+        for args in ["persona seagull", "on", "off", "status", "edit"] {
             assert!(
                 UncensoredCommand.suggest_args(&context, args).is_none(),
                 "{args:?} is complete and must not offer a row"
@@ -242,16 +224,15 @@ mod tests {
         }
     }
 
-    /// A partial `pack` query completes to pack ids, not to the word `pack`.
     #[test]
-    fn a_partial_pack_query_completes_to_ids() {
+    fn a_partial_persona_query_completes_to_ids() {
         let models = ModelState::default();
         let context = app_ctx(&models);
         let rows = UncensoredCommand
-            .suggest_args(&context, "pack anti")
+            .suggest_args(&context, "persona sea")
             .expect("partial query offers rows");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].insert_text, "anticheat");
+        assert_eq!(rows[0].insert_text, "seagull");
     }
 
     #[test]
@@ -265,42 +246,28 @@ mod tests {
         }
     }
 
-    /// `/uncensored pack` replaces the mounted packs; a bare `pack` clears them
-    /// so the request returns to the protocol-only size.
     #[test]
-    fn pack_selects_and_clears_scene_bodies() {
+    fn persona_selects_a_body() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut context = ctx(&models, &bundle);
-        match UncensoredCommand.run(&mut context, "pack anticheat") {
-            CommandResult::Action(Action::SetUncensoredPacks { packs }) => {
-                assert_eq!(packs, vec!["anticheat".to_string()]);
+        match UncensoredCommand.run(&mut context, "persona brief") {
+            CommandResult::Action(Action::SetUncensoredPersona { persona }) => {
+                assert_eq!(persona, "brief");
             }
-            other => panic!("expected SetUncensoredPacks, got {other:?}"),
-        }
-        let mut context = ctx(&models, &bundle);
-        match UncensoredCommand.run(&mut context, "pack web,ctf") {
-            CommandResult::Action(Action::SetUncensoredPacks { packs }) => {
-                assert_eq!(packs, vec!["web".to_string(), "ctf".to_string()]);
-            }
-            other => panic!("expected SetUncensoredPacks, got {other:?}"),
-        }
-        let mut context = ctx(&models, &bundle);
-        match UncensoredCommand.run(&mut context, "pack") {
-            CommandResult::Action(Action::SetUncensoredPacks { packs }) => assert!(packs.is_empty()),
-            other => panic!("expected an empty SetUncensoredPacks, got {other:?}"),
+            other => panic!("expected SetUncensoredPersona, got {other:?}"),
         }
     }
 
     #[test]
-    fn an_unknown_pack_is_rejected_with_the_list() {
+    fn an_unknown_persona_is_rejected_with_the_list() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut context = ctx(&models, &bundle);
-        match UncensoredCommand.run(&mut context, "pack nope") {
+        match UncensoredCommand.run(&mut context, "persona nope") {
             CommandResult::Error(message) => {
-                assert!(message.contains("Unknown pack"));
-                assert!(message.contains("legacy-extended"));
+                assert!(message.contains("Unknown persona"));
+                assert!(message.contains("seagull"));
             }
             other => panic!("expected an error, got {other:?}"),
         }

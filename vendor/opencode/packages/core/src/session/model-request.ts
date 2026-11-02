@@ -33,7 +33,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { Tool } from "../tool.js"
 import { SessionAffinity } from "./affinity.js"
 import { SessionModelTransport } from "./model-transport.js"
-import { SessionProtocolPolicy } from "./protocol-policy.js"
+import { SessionAgentPersona } from "./agent-persona.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
@@ -228,7 +228,7 @@ export const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
-    const policy = yield* SessionProtocolPolicy.Service
+    const persona = yield* SessionAgentPersona.Service
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
@@ -276,14 +276,15 @@ export const layer = Layer.effect(
       const generation = Object.fromEntries(entries.filter(([k]) => GENERATION_KEYS.has(k))) as GenerationOptionsFields
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = SessionAffinity.get(session)
-      // L1: the actor and isolation parts go before the base prompt, so a later
-      // plugin append or a user policy file cannot outrank them.
-      const system = yield* policy.enrich({ agent: input.agent, parts: shaped.system })
-      // L2: a refusal left in the transcript is what the next turn stays
+      // The persona leads the system prompt. A user-installed body replaces the
+      // identity the model answers from, so the base prompt operates under it
+      // instead of competing with a rule list appended after it.
+      const system = yield* persona.enrich({ agent: input.agent, parts: shaped.system })
+      // A refusal left in the transcript is what the next turn stays
       // consistent with. Rewriting happens on the transcript copy only.
-      const rewritten = yield* policy.rewriteRefusals({ agent: input.agent, messages: shaped.messages })
-      // L0: provider body overlay. `undefined` keeps the request byte-identical.
-      const body = yield* policy.bodyOverlay({
+      const rewritten = yield* persona.rewriteRefusals({ agent: input.agent, messages: shaped.messages })
+      // Provider body overlay. `undefined` keeps the request byte-identical.
+      const body = yield* persona.bodyOverlay({
         providerID: model.ref.providerID,
         existing: model.model.defaults?.http?.body,
       })
@@ -435,5 +436,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node, SessionProtocolPolicy.node],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, SessionAgentPersona.node],
 })

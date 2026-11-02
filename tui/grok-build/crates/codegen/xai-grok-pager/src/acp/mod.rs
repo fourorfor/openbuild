@@ -352,17 +352,23 @@ pub async fn connect_opencode_slot(
             }
         }
 
-        // The policy files are user-visible content, so they are installed only
-        // when missing. A failure must not block the kernel: the plugin falls
-        // back to the bundled defaults.
+        // Persona bodies are user-visible content, so they are installed only
+        // when missing. A failure must not block the kernel: a missing body
+        // simply leaves the agent on the base system prompt.
         let policies = openbuild_backend::plugin::ensure_policy_files();
         for error in &policies.errors {
-            tracing::warn!(%error, "uncensored policy install failed");
+            tracing::warn!(%error, "uncensored persona install failed");
         }
         if !policies.written.is_empty() {
             tracing::info!(
                 written = policies.written.len(),
-                "uncensored policy files created"
+                "uncensored persona bodies created"
+            );
+        }
+        if !policies.removed.is_empty() {
+            tracing::info!(
+                removed = policies.removed.len(),
+                "retired uncensored policy files removed"
             );
         }
     }
